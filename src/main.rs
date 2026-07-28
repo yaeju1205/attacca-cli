@@ -78,12 +78,6 @@ enum MessageRole {
 }
 
 #[derive(Deserialize, Default)]
-struct ErrorDto {
-    code: Option<String>,
-    message: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
 struct MeDto {
     #[serde(default)]
     user_id: String,
@@ -342,7 +336,7 @@ fn format_tool(tc: &ToolCall) -> String {
 // API client
 // ---------------------------------------------------------------------------
 
-const DEFAULT_API_URL: &str = "https://attacca.cc";
+const DEFAULT_API_URL: &str = "https://attacca.cc/api/v1";
 
 struct ApiClient {
     inner: Client,
@@ -369,7 +363,7 @@ impl ApiClient {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", self.key).parse().unwrap(),
         );
-        // Force JSON response — some deployments return SPA HTML without this
+        // Force JSON response — the main attacca.cc returns SPA HTML without it
         h.insert(
             reqwest::header::ACCEPT,
             "application/json".parse().unwrap(),
@@ -378,9 +372,14 @@ impl ApiClient {
     }
 
     fn url(&self, path: &str) -> String {
-        // If base_url already has a path prefix, don't double it
         let base = self.base_url.trim_end_matches('/');
-        let p = path.trim_start_matches('/');
+        // Strip /v1/ prefix if the base already includes /api/v1
+        let p = if base.contains("/api/v1") && path.starts_with("/v1/") {
+            &path[3..] // chop "/v1" → "/me", "/sessions/..."
+        } else {
+            path
+        };
+        let p = p.trim_start_matches('/');
         format!("{base}/{p}")
     }
 
