@@ -106,13 +106,9 @@ fn run_cmd(cmd: &str) -> String {
     }
 }
 
-/// Shorten a UUID for display.
+/// Shorten a UUID for display (UTF-8 safe).
 pub fn short(s: &str) -> String {
-    if s.len() > 8 {
-        s[..8].to_string()
-    } else {
-        s.to_string()
-    }
+    s.chars().take(8).collect()
 }
 
 #[cfg(test)]

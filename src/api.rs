@@ -72,7 +72,7 @@ impl Api {
                 if let Ok(v) = serde_json::from_str::<Value>(&body) {
                     format!("✓ {}", v["display_name"].as_str().unwrap_or("?"))
                 } else {
-                    format!("✓ ok")
+                    "✓ ok".to_string()
                 }
             }
             Err((s, b)) => format!("✖ HTTP {s}: {}", b.chars().take(60).collect::<String>()),
