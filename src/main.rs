@@ -7,10 +7,6 @@ use serde_json::Value;
 use rustyline::DefaultEditor;
 use std::collections::HashMap;
 
-// ---------------------------------------------------------------------------
-// Protocol
-// ---------------------------------------------------------------------------
-
 const PROTOCOL: &str = r#"## attacca-cli bridge protocol
 
 You are connected to the user's **local computer** through attacca-cli. To
@@ -53,7 +49,15 @@ struct SessionDto {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    status: String,
+    #[serde(default)]
     running: bool,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
 }
 
 #[derive(Deserialize)]
@@ -81,8 +85,6 @@ enum MessageRole {
 #[derive(Deserialize, Default)]
 struct MeDto {
     #[serde(default)]
-    user_id: String,
-    #[serde(default)]
     display_name: String,
     #[serde(default)]
     email: String,
@@ -98,7 +100,7 @@ struct AgentDto {
     description: Option<String>,
 }
 
-#[derive(Deserialize, Default, Debug)]
+#[derive(Deserialize, Default, Debug, Clone)]
 struct ProjectDto {
     id: String,
     name: String,
@@ -112,32 +114,23 @@ struct ProjectDto {
 // API helpers
 // ---------------------------------------------------------------------------
 
-async fn json_or_body<T: serde::de::DeserializeOwned>(
-    resp: reqwest::Response,
-) -> Result<T, String> {
+async fn json_or_body<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, String> {
     let status = resp.status();
     let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
     match serde_json::from_str::<T>(&body) {
         Ok(val) => Ok(val),
         Err(e) => {
-            let preview = if body.len() > 300 {
-                format!("{}...", &body[..300])
-            } else {
-                body.clone()
-            };
+            let preview = if body.len() > 300 { format!("{}...", &body[..300]) } else { body.clone() };
             Err(format!("Status: {status}\nJSON decode: {e}\nRaw: {preview}"))
         }
     }
 }
 
-async fn api_call<T: serde::de::DeserializeOwned>(
-    req: reqwest::RequestBuilder,
-) -> Result<T, String> {
+async fn api_call<T: serde::de::DeserializeOwned>(req: reqwest::RequestBuilder) -> Result<T, String> {
     let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
-    if status.is_success() {
-        json_or_body::<T>(resp).await
-    } else {
+    if status.is_success() { json_or_body::<T>(resp).await }
+    else {
         let body = resp.text().await.unwrap_or_default();
         let preview = if body.len() > 300 { format!("{}...", &body[..300]) } else { body };
         Err(format!("HTTP {status}\nResponse: {preview}"))
@@ -151,15 +144,16 @@ async fn api_call<T: serde::de::DeserializeOwned>(
 #[derive(Parser)]
 #[command(name = "attacca", version, about = "Chat with Attacca agents -- local bridge mode")]
 struct Cli {
-    /// Message to send (one-shot mode)
+    #[arg(help = "Message to send (one-shot mode)")]
     message: Option<String>,
 
-    /// Project UUID or name to attach this chat to
-    #[arg(short = 'P', long, env = "ATTACCA_PROJECT")]
+    #[arg(short = 'P', long, env = "ATTACCA_PROJECT", help = "Project name or UUID")]
     project: Option<String>,
 
-    /// Agent UUID to run this chat on
-    #[arg(short = 'A', long, env = "ATTACCA_AGENT")]
+    #[arg(short = 'S', long, env = "ATTACCA_SESSION", help = "Session UUID (resume existing)")]
+    session: Option<String>,
+
+    #[arg(short = 'A', long, env = "ATTACCA_AGENT", help = "Agent UUID")]
     agent: Option<String>,
 }
 
@@ -168,49 +162,26 @@ struct Cli {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct ToolCall {
-    name: String,
-    args: HashMap<String, String>,
-}
+struct ToolCall { name: String, args: HashMap<String, String> }
 
 fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
     let mut tools = Vec::new();
     let mut clean = text.to_string();
-    let start_marker = "```attacca-tool";
-    let end_marker = "```";
-
     loop {
-        let start = match clean.find(start_marker) {
-            Some(i) => i,
-            None => break,
-        };
-        let content_start = start + start_marker.len();
-        let end = match clean[content_start..].find(end_marker) {
-            Some(i) => content_start + i,
-            None => break,
-        };
-
-        let json_str = clean[content_start..end].trim();
-        if let Ok(tc) = parse_single_tool(json_str) {
-            tools.push(tc);
+        let start = match clean.find("```attacca-tool") { Some(i) => i, None => break };
+        let cs = start + "```attacca-tool".len();
+        let end = match clean[cs..].find("```") { Some(i) => cs + i, None => break };
+        let json_str = clean[cs..end].trim();
+        if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+            if let (Some(name), Some(args_obj)) = (v["tool"].as_str(), v.get("args").and_then(|a| a.as_object())) {
+                let args = args_obj.iter().map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string())).collect();
+                tools.push(ToolCall { name: name.to_string(), args });
+            }
         }
-
-        let block_end = end + end_marker.len();
-        clean.replace_range(start..block_end, "");
+        let be = end + "```".len();
+        clean.replace_range(start..be, "");
     }
-
     (clean.trim().to_string(), tools)
-}
-
-fn parse_single_tool(json: &str) -> Result<ToolCall, String> {
-    let v: Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
-    let name = v["tool"].as_str().ok_or("missing 'tool'")?.to_string();
-    let args_obj = v.get("args").and_then(|a| a.as_object()).ok_or("missing 'args'")?;
-    let mut args = HashMap::new();
-    for (k, val) in args_obj {
-        args.insert(k.clone(), val.as_str().unwrap_or("").to_string());
-    }
-    Ok(ToolCall { name, args })
 }
 
 // ---------------------------------------------------------------------------
@@ -223,136 +194,88 @@ fn execute_tool(tc: &ToolCall) -> String {
         "read_file" => {
             let path = tc.args.get("path").unwrap_or(&empty);
             match std::fs::read_to_string(path) {
-                Ok(s) => {
-                    if s.len() > 100_000 {
-                        format!("[file too large: {} bytes, showing first 100k]\n{}", s.len(), &s[..100_000])
-                    } else {
-                        format!("[file content ({} bytes)]:\n{}", s.len(), s)
-                    }
-                }
-                Err(e) => format!("[error reading file: {e}]"),
+                Ok(s) if s.len() > 100_000 => format!("[file too large: {} bytes, first 100k]\n{}", s.len(), &s[..100_000]),
+                Ok(s) => format!("[file content ({} bytes)]:\n{}", s.len(), s),
+                Err(e) => format!("[error: {e}]"),
             }
         }
         "write_file" => {
-            let path = tc.args.get("path").unwrap_or(&empty);
-            let content = tc.args.get("content").unwrap_or(&empty);
-            match std::fs::write(path, content) {
-                Ok(()) => format!("[OK] wrote {} bytes to {}", content.len(), path),
-                Err(e) => format!("[error writing file: {e}]"),
-            }
+            let (path, content) = (tc.args.get("path").unwrap_or(&empty), tc.args.get("content").unwrap_or(&empty));
+            match std::fs::write(path, content) { Ok(()) => format!("[OK] wrote {} bytes", content.len()), Err(e) => format!("[error: {e}]") }
         }
         "edit_file" => {
-            let path = tc.args.get("path").unwrap_or(&empty);
-            let old = tc.args.get("old_string").unwrap_or(&empty);
-            let new = tc.args.get("new_string").unwrap_or(&empty);
+            let (path, old, new) = (tc.args.get("path").unwrap_or(&empty), tc.args.get("old_string").unwrap_or(&empty), tc.args.get("new_string").unwrap_or(&empty));
             match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    if content.contains(old.as_str()) {
-                        let new_content = content.replace(old.as_str(), new.as_str());
-                        match std::fs::write(path, &new_content) {
-                            Ok(()) => {
-                                let count = content.matches(old.as_str()).count();
-                                format!("[OK] replaced {} occurrence(s) in {}", count, path)
-                            }
-                            Err(e) => format!("[error writing after edit: {e}]"),
-                        }
-                    } else {
-                        format!("[error] string not found in {}", path)
-                    }
+                Ok(c) if c.contains(old.as_str()) => {
+                    let nc = c.replace(old.as_str(), new.as_str());
+                    let count = c.matches(old.as_str()).count();
+                    match std::fs::write(path, &nc) { Ok(()) => format!("[OK] {} replacements in {}", count, path), Err(e) => format!("[error: {e}]") }
                 }
-                Err(e) => format!("[error reading for edit: {e}]"),
+                Ok(_) => format!("[error] not found in {}", path),
+                Err(e) => format!("[error: {e}]"),
             }
         }
         "list_dir" => {
             let path = tc.args.get("path").unwrap_or(&empty);
             match std::fs::read_dir(path) {
                 Ok(entries) => {
-                    let mut items: Vec<String> = Vec::new();
-                    for entry in entries.flatten() {
-                        let ftype = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                            "📁"
-                        } else {
-                            "📄"
-                        };
-                        items.push(format!("{} {}", ftype, entry.file_name().to_string_lossy()));
-                    }
+                    let mut items: Vec<String> = entries.flatten().map(|e| {
+                        format!("{} {}", if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { "📁" } else { "📄" }, e.file_name().to_string_lossy())
+                    }).collect();
                     items.sort();
-                    format!("[{} entries]:\n{}", items.len(), items.join("\n"))
+                    format!("[{} items]\n{}", items.len(), items.join("\n"))
                 }
-                Err(e) => format!("[error listing dir: {e}]"),
+                Err(e) => format!("[error: {e}]"),
             }
         }
         "run_command" => {
             let cmd = tc.args.get("command").unwrap_or(&empty);
             match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                Ok(output) => {
-                    let mut result = String::new();
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stdout.is_empty() { result.push_str(&format!("[stdout]:\n{stdout}\n")); }
-                    if !stderr.is_empty() { result.push_str(&format!("[stderr]:\n{stderr}\n")); }
-                    result.push_str(&format!("[exit code: {}]", output.status.code().unwrap_or(-1)));
-                    result
+                Ok(o) => {
+                    let mut r = String::new();
+                    let so = String::from_utf8_lossy(&o.stdout);
+                    let se = String::from_utf8_lossy(&o.stderr);
+                    if !so.is_empty() { r.push_str(&format!("[out]:\n{so}\n")); }
+                    if !se.is_empty() { r.push_str(&format!("[err]:\n{se}\n")); }
+                    r.push_str(&format!("[exit: {}]", o.status.code().unwrap_or(-1)));
+                    r
                 }
-                Err(e) => format!("[error running command: {e}]"),
+                Err(e) => format!("[error: {e}]"),
             }
         }
         "create_dir" => {
             let path = tc.args.get("path").unwrap_or(&empty);
-            match std::fs::create_dir_all(path) {
-                Ok(()) => format!("[OK] created directory {}", path),
-                Err(e) => format!("[error creating dir: {e}]"),
-            }
+            match std::fs::create_dir_all(path) { Ok(()) => format!("[OK] created"), Err(e) => format!("[error: {e}]") }
         }
         "file_exists" => {
             let path = tc.args.get("path").unwrap_or(&empty);
-            let exists = std::path::Path::new(path).exists();
-            if exists { format!("[true] {} exists", path) } else { format!("[false] {} does not exist", path) }
+            if std::path::Path::new(path).exists() { format!("[true] exists") } else { format!("[false] not found") }
         }
         "delete_file" => {
             let path = tc.args.get("path").unwrap_or(&empty);
-            match std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path)) {
-                Ok(()) => format!("[OK] deleted {}", path),
-                Err(e) => format!("[error deleting: {e}]"),
-            }
+            match std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path)) { Ok(()) => format!("[OK] deleted"), Err(e) => format!("[error: {e}]") }
         }
         "read_files" => {
-            let paths_str = tc.args.get("paths").unwrap_or(&empty);
-            let paths: Vec<String> = if paths_str.starts_with('[') {
-                serde_json::from_str::<Vec<String>>(paths_str).unwrap_or(vec![paths_str.clone()])
-            } else {
-                paths_str.split(',').map(|s| s.trim().to_string()).collect()
-            };
-            let mut results = Vec::new();
-            for p in &paths {
-                match std::fs::read_to_string(p) {
-                    Ok(s) => results.push(format!("--- {} ---\n{}", p, s)),
-                    Err(e) => results.push(format!("--- {} ---\n[error: {e}]", p)),
-                }
-            }
-            results.join("\n")
+            let ps = tc.args.get("paths").unwrap_or(&empty);
+            let paths: Vec<String> = if ps.starts_with('[') { serde_json::from_str(ps).unwrap_or(vec![ps.clone()]) } else { ps.split(',').map(|s| s.trim().to_string()).collect() };
+            let mut r = Vec::new();
+            for p in &paths { match std::fs::read_to_string(p) { Ok(s) => r.push(format!("--- {} ---\n{}", p, s)), Err(e) => r.push(format!("--- {} ---\n[error: {e}]", p)) } }
+            r.join("\n")
         }
-        other => format!("[unknown tool: {other}]"),
+        other => format!("[unknown: {other}]"),
     }
 }
 
 fn is_dangerous(tc: &ToolCall) -> bool {
     if tc.name == "run_command" {
         let cmd = tc.args.get("command").map(|s| s.as_str()).unwrap_or("");
-        cmd.contains("rm ") || cmd.contains("sudo ") || cmd.contains("dd ") || cmd.contains("mkfs")
-            || cmd.contains('>') || (cmd.contains('|') && cmd.contains("rm"))
-    } else {
-        false
-    }
+        cmd.contains("rm ") || cmd.contains("sudo ") || cmd.contains("dd ") || cmd.contains("mkfs") || cmd.contains('>') || (cmd.contains('|') && cmd.contains("rm"))
+    } else { false }
 }
 
 fn format_tool(tc: &ToolCall) -> String {
     let args: Vec<String> = tc.args.iter().map(|(k, v)| {
-        if v.len() > 60 {
-            format!("{}: \"{}...\"", k, &v[..60])
-        } else {
-            format!("{}: \"{}\"", k, v)
-        }
+        if v.len() > 60 { format!("{}: \"{}...\"", k, &v[..60]) } else { format!("{}: \"{}\"", k, v) }
     }).collect();
     format!("{}({})", tc.name, args.join(", "))
 }
@@ -363,26 +286,17 @@ fn format_tool(tc: &ToolCall) -> String {
 
 const DEFAULT_API_URL: &str = "https://attacca.cc/api/v1";
 
-struct ApiClient {
-    inner: Client,
-    key: String,
-    base_url: String,
-}
+struct ApiClient { inner: Client, key: String, base_url: String }
 
 impl ApiClient {
     fn from_env() -> Result<Self, String> {
-        let key = std::env::var("ATTACCA_API_KEY").map_err(|_| {
-            "Set ATTACCA_API_KEY (or add it to .env)\n  Get one at https://attacca.cc/settings/api-keys".to_string()
-        })?;
+        let key = std::env::var("ATTACCA_API_KEY").map_err(|_| "Set ATTACCA_API_KEY (or .env)\n  Get at https://attacca.cc/settings/api-keys".to_string())?;
         let base_url = std::env::var("ATTACCA_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-        let inner = Client::builder()
-            .user_agent("attacca-cli/0.1.0")
-            .build()
-            .map_err(|e| format!("reqwest: {e}"))?;
+        let inner = Client::builder().user_agent("attacca-cli/0.1.0").build().map_err(|e| format!("reqwest: {e}"))?;
         Ok(Self { inner, key, base_url })
     }
 
-    fn bearer_header(&self) -> reqwest::header::HeaderMap {
+    fn bearer(&self) -> reqwest::header::HeaderMap {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.key).parse().unwrap());
         h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
@@ -391,121 +305,84 @@ impl ApiClient {
 
     fn url(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let p = if base.contains("/api/v1") && path.starts_with("/v1/") {
-            &path[3..]
-        } else {
-            path
-        };
-        let p = p.trim_start_matches('/');
-        format!("{base}/{p}")
+        let p = if base.contains("/api/v1") && path.starts_with("/v1/") { &path[3..] } else { path };
+        format!("{}/{}", base, p.trim_start_matches('/'))
     }
 
-    async fn get_me(&self) -> Result<MeDto, String> {
-        api_call(self.inner.get(self.url("/v1/me")).headers(self.bearer_header())).await
-    }
-
-    async fn list_agents(&self) -> Result<Vec<AgentDto>, String> {
-        api_call(self.inner.get(self.url("/v1/agents")).headers(self.bearer_header())).await
-    }
-
-    async fn list_projects(&self) -> Result<Vec<ProjectDto>, String> {
-        api_call(self.inner.get(self.url("/v1/projects")).headers(self.bearer_header())).await
+    async fn get_me(&self) -> Result<MeDto, String> { api_call(self.inner.get(self.url("/v1/me")).headers(self.bearer())).await }
+    async fn list_agents(&self) -> Result<Vec<AgentDto>, String> { api_call(self.inner.get(self.url("/v1/agents")).headers(self.bearer())).await }
+    async fn list_projects(&self) -> Result<Vec<ProjectDto>, String> { api_call(self.inner.get(self.url("/v1/projects")).headers(self.bearer())).await }
+    async fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<SessionDto>, String> {
+        let mut req = self.inner.get(self.url("/v1/sessions")).headers(self.bearer());
+        if let Some(pid) = project_id { req = req.query(&[("project_id", pid)]); }
+        api_call(req).await
     }
 
     async fn create_session(&self, project_id: Option<&str>, agent_id: Option<&str>) -> Result<SessionDto, String> {
         let mut body = serde_json::json!({"title": "attacca-cli"});
-        if let Some(pid) = project_id {
-            body["project_id"] = serde_json::json!(pid);
-        }
-        if let Some(aid) = agent_id {
-            body["agent_id"] = serde_json::json!(aid);
-        }
-        api_call(
-            self.inner.post(self.url("/v1/sessions"))
-                .headers(self.bearer_header())
-                .json(&body),
-        ).await
+        if let Some(pid) = project_id { body["project_id"] = serde_json::json!(pid); }
+        if let Some(aid) = agent_id { body["agent_id"] = serde_json::json!(aid); }
+        api_call(self.inner.post(self.url("/v1/sessions")).headers(self.bearer()).json(&body)).await
     }
 
     async fn send_message(&self, session_id: &str, msg: &str) -> Result<(), String> {
-        let resp = self.inner.post(self.url(&format!("/v1/sessions/{session_id}/messages")))
-            .headers(self.bearer_header())
-            .json(&serde_json::json!({"message": msg, "timezone": "Asia/Seoul"}))
-            .send().await.map_err(|e| format!("request: {e}"))?;
-        let status = resp.status();
-        if status.is_success() || status.as_u16() == 202 {
-            Ok(())
-        } else {
-            let body = resp.text().await.unwrap_or_default();
-            Err(format!("HTTP {status}\nBody: {}", &body[..body.len().min(300)]))
-        }
+        let body = serde_json::json!({"message": msg, "timezone": "Asia/Seoul"});
+        let resp = self.inner.post(self.url(&format!("/v1/sessions/{session_id}/messages"))).headers(self.bearer()).json(&body).send().await.map_err(|e| format!("request: {e}"))?;
+        let s = resp.status();
+        if s.is_success() || s.as_u16() == 202 { Ok(()) }
+        else { let b = resp.text().await.unwrap_or_default(); Err(format!("HTTP {s}\n{}", &b[..b.len().min(300)])) }
     }
 
     async fn get_session(&self, session_id: &str) -> Result<SessionDto, String> {
-        api_call(self.inner.get(self.url(&format!("/v1/sessions/{session_id}"))).headers(self.bearer_header())).await
+        api_call(self.inner.get(self.url(&format!("/v1/sessions/{session_id}"))).headers(self.bearer())).await
     }
 
     async fn get_messages_after(&self, session_id: &str, after: i64) -> Result<Vec<MessageDto>, String> {
-        api_call(
-            self.inner.get(self.url(&format!("/v1/sessions/{session_id}/messages?after={after}")))
-                .headers(self.bearer_header()),
-        ).await.map(|mut msgs: Vec<MessageDto>| { msgs.reverse(); msgs })
+        api_call(self.inner.get(self.url(&format!("/v1/sessions/{session_id}/messages?after={after}"))).headers(self.bearer())).await
+            .map(|mut msgs: Vec<MessageDto>| { msgs.reverse(); msgs })
     }
 
     async fn wait_until_done(&self, session_id: &str) -> Result<(), String> {
-        loop {
-            let sess = self.get_session(session_id).await?;
-            if !sess.running { return Ok(()); }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+        loop { let s = self.get_session(session_id).await?; if !s.running { return Ok(()); } tokio::time::sleep(std::time::Duration::from_millis(500)).await; }
     }
 
-    /// Resolve --project flag: try UUID first, then name match
     async fn resolve_project(&self, project: &str) -> Result<String, String> {
-        // If it looks like a UUID, use it directly
-        if project.len() == 36 && project.contains('-') {
-            return Ok(project.to_string());
-        }
-        // Otherwise match by name
-        let projects = self.list_projects().await?;
-        for p in &projects {
-            if p.name == project {
-                return Ok(p.id.clone());
-            }
-        }
-        Err(format!("Project '{project}' not found. Available:\n  {}", projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("\n  ")))
+        if project.len() == 36 && project.contains('-') { return Ok(project.to_string()); }
+        let ps = self.list_projects().await?;
+        for p in &ps { if p.name == project { return Ok(p.id.clone()); } }
+        Err(format!("Project '{project}' not found. Available:\n  {}", ps.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("\n  ")))
     }
+
+    /// Find last cursor in a session (for resuming). Returns 0 if no messages.
+    async fn get_last_cursor(&self, session_id: &str) -> Result<i64, String> {
+        let msgs = self.get_messages_after(session_id, 0).await?;
+        Ok(msgs.iter().map(|m| m.cursor).max().unwrap_or(0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Picker helpers
+// ---------------------------------------------------------------------------
+
+fn ask_number(max: usize) -> Option<usize> {
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+    let n = input.trim().parse::<usize>().ok()?;
+    if n == 0 || n > max { None } else { Some(n - 1) }
+}
+
+fn short_id(id: &str) -> String { if id.len() > 8 { id[..8].to_string() } else { id.to_string() } }
+
+fn fmt_time(iso: &str) -> &str {
+    if iso.len() > 19 { &iso[..19] } else { iso }
 }
 
 // ---------------------------------------------------------------------------
 // UI helpers
 // ---------------------------------------------------------------------------
 
-fn print_error(msg: &str) {
-    eprintln!("✖ {}", msg.bright_red());
-}
-
-fn print_banner(me: &MeDto, project_name: Option<&str>, agent_name: Option<&str>) {
-    println!();
-    println!("{}  Attacca CLI -- {} ({})", "◆".bright_cyan(), me.display_name.bold(), me.email);
-    if let Some(pn) = project_name {
-        println!("{}  Project: {}", "📁".bright_cyan(), pn.bold());
-    }
-    if let Some(an) = agent_name {
-        println!("{}  Agent: {}", "🤖".bright_cyan(), an.bold());
-    }
-    println!("{}  Bridge mode: agent can access your local computer via tools", "🔗".bright_cyan());
-    println!("{}  Type /help for commands", "◆".bright_cyan());
-    println!();
-}
-
-fn print_assistant(text: &str) {
-    if text.is_empty() { return; }
-    for line in text.lines() {
-        println!("{} {}", "│".bright_blue(), line);
-    }
-    println!();
-}
+fn print_error(msg: &str) { eprintln!("✖ {}", msg.bright_red()); }
+fn print_assistant(text: &str) { if text.is_empty() { return; } for l in text.lines() { println!("{} {}", "│".bright_blue(), l); } println!(); }
 
 fn print_tool_invoke(tc: &ToolCall, is_danger: bool) {
     let icon = if is_danger { "⚠".bright_red().to_string() } else { "🔧".bright_yellow().to_string() };
@@ -514,61 +391,96 @@ fn print_tool_invoke(tc: &ToolCall, is_danger: bool) {
 
 fn ask_approve(danger: bool) -> bool {
     let default = if danger { "n" } else { "Y" };
-    print!("{} Execute? [{}/{}] ", "  └".bright_black(),
-        default.to_uppercase().green(),
-        if default == "Y" { "n".bright_red() } else { "y".bright_green() });
-    use std::io::Write;
-    std::io::stdout().flush().ok();
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
-    let input = input.trim().to_lowercase();
-    if input.is_empty() { default == "Y" } else { input == "y" }
+    print!("  └ Execute? [{}/{}] ", default.to_uppercase().green(), if default == "Y" { "n".bright_red() } else { "y".bright_green() });
+    use std::io::Write; std::io::stdout().flush().ok();
+    let mut i = String::new(); std::io::stdin().read_line(&mut i).ok();
+    let i = i.trim().to_lowercase();
+    if i.is_empty() { default == "Y" } else { i == "y" }
 }
 
 // ---------------------------------------------------------------------------
-// Interactive mode
+// Interactive session
 // ---------------------------------------------------------------------------
 
-async fn run_interactive(client: &ApiClient, project_id: Option<String>, agent_id: Option<String>) -> Result<(), String> {
-    let me = client.get_me().await?;
+type SessionInfo = (String, i64, bool); // (session_id, cursor, first_turn)
 
-    // Resolve names for display
-    let project_name = if project_id.is_some() {
-        client.list_projects().await.ok().and_then(|ps| {
-            let pid = project_id.as_ref().unwrap();
-            ps.iter().find(|p| p.id == *pid).map(|p| p.name.clone())
-        })
-    } else { None };
-
-    let agent_name = if agent_id.is_some() {
-        client.list_agents().await.ok().and_then(|as_| {
-            let aid = agent_id.as_ref().unwrap();
-            as_.iter().find(|a| a.id == *aid).map(|a| a.name.clone())
-        })
-    } else { None };
-
-    print_banner(&me, project_name.as_deref(), agent_name.as_deref());
-
-    let mut session_id;
-    {
-        let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
-        session_id = s.id;
-    }
-    println!("{} Session: {}", "💬".bright_black(), session_id);
-    println!("{} CWD: {}", "📁".bright_black(),
-        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default());
+/// Pick or create a session. Returns (session_id, cursor, is_first_turn).
+async fn pick_session(client: &ApiClient, project_id: Option<String>, agent_id: Option<String>) -> Result<SessionInfo, String> {
     println!();
+    println!("{} Pick a session:", "💬".bright_cyan());
+
+    let sessions = client.list_sessions(project_id.as_deref()).await.unwrap_or_default();
+
+    // Show only non-running sessions (settled)
+    let settled: Vec<&SessionDto> = sessions.iter().filter(|s| !s.running && s.status != "deleted").collect();
+
+    if settled.is_empty() {
+        println!("{}  No existing sessions — creating a new one.", "  ".bright_black());
+        let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
+        return Ok((s.id, 0, true));
+    }
+
+    // Show 10 most recent
+    let count = settled.len().min(10);
+    println!("{}  Recent sessions:", "  ".bright_black());
+    for (i, s) in settled[..count].iter().enumerate() {
+        let title = if s.title.is_empty() { "(untitled)" } else { &s.title };
+        let age = fmt_time(&s.updated_at);
+        let sid = short_id(&s.id);
+        println!("  {}. {} [{}] {} — {}", (i + 1).to_string().bright_green(), "💬".bright_black(), sid, title.bold(), age.bright_black());
+    }
+    if count < settled.len() { println!("  ... and {} older sessions", settled.len() - count); }
+
+    println!("  {}. {} Create a new session", (count + 1).to_string().bright_green(), "✨".bright_cyan());
+    print!("{}  Choose [1-{}]: ", "→".bright_green(), count + 1);
+    use std::io::Write; std::io::stdout().flush().ok();
+
+    match ask_number(count + 1) {
+        Some(idx) if idx < count => {
+            let sess = settled[idx];
+            let cursor = client.get_last_cursor(&sess.id).await.unwrap_or(0);
+            println!("{}  Resuming session {} ({})", "  ↻".bright_black(), sess.id, sess.title);
+            Ok((sess.id.clone(), cursor, false))
+        }
+        _ => {
+            let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
+            println!("{}  Created session {}", "  ✚".bright_green(), s.id);
+            Ok((s.id, 0, true))
+        }
+    }
+}
+
+async fn run_interactive(client: &ApiClient, project_id: Option<String>, session_id: Option<String>, agent_id: Option<String>) -> Result<(), String> {
+    let me = client.get_me().await?;
+    let projects = client.list_projects().await.ok().unwrap_or_default();
+    let agents = client.list_agents().await.ok().unwrap_or_default();
+
+    let project_name = project_id.as_ref().and_then(|pid| projects.iter().find(|p| p.id == *pid).map(|p| p.name.as_str()));
+    let agent_name = agent_id.as_ref().and_then(|aid| agents.iter().find(|a| a.id == *aid).map(|a| a.name.as_str()));
+
+    // Banner
+    println!();
+    println!("{}  Attacca CLI — {} ({})", "◆".bright_cyan(), me.display_name.bold(), me.email);
+    if let Some(pn) = project_name { println!("{}  Project: {}", "📁".bright_cyan(), pn.bold()); }
+    if let Some(an) = agent_name { println!("{}  Agent: {}", "🤖".bright_cyan(), an.bold()); }
+    println!("{}  Bridge mode: agent can access your local computer via tools", "🔗".bright_cyan());
+    println!("{}  Type /help\n", "◆".bright_cyan());
+
+    // Pick or resume session
+    let (mut session_id, mut cursor, mut first_turn) = if let Some(sid) = session_id {
+        let cur = client.get_last_cursor(&sid).await.unwrap_or(0);
+        println!("{} Resuming session {}", "↻".bright_black(), sid);
+        (sid, cur, false)
+    } else {
+        pick_session(client, project_id.clone(), agent_id.clone()).await?
+    };
 
     let mut rl = DefaultEditor::new().map_err(|e| format!("rustyline: {e}"))?;
     let _ = rl.load_history("attacca_history.txt");
 
-    let mut cursor = 0i64;
-    let mut first_turn = true;
-
     loop {
         let prompt = "→ ".bright_green().to_string();
-        let line = rl.readline(&prompt);
-        match line {
+        match rl.readline(&prompt) {
             Ok(input) => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() { continue; }
@@ -578,90 +490,71 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, agent_i
                 match trimmed.as_str() {
                     "/help" => {
                         println!("{} Commands:", "●".bright_yellow());
-                        println!("  /help         Show this");
-                        println!("  /quit         Exit");
-                        println!("  /new          Start a fresh session");
-                        println!("  anything      Send to agent");
+                        println!("  /help     Show this");
+                        println!("  /new      New session");
+                        println!("  /sessions Switch session");
+                        println!("  /quit     Exit");
                         println!();
                         println!("{} Flags:", "●".bright_yellow());
-                        println!("  --project,-P <name|uuid>   Attach chat to a project");
-                        println!("  --agent,-A  <uuid>         Use a specific agent");
-                        println!("  ATTACCA_PROJECT env var     Default project");
+                        println!("  -P, --project   Project name/UUID");
+                        println!("  -S, --session   Session UUID (resume)");
+                        println!("  -A, --agent     Agent UUID");
                         continue;
                     }
                     "/quit" | "/exit" => break,
                     "/new" => {
                         let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
-                        session_id = s.id;
-                        cursor = 0;
-                        first_turn = true;
+                        session_id = s.id; cursor = 0; first_turn = true;
                         println!("{} New session: {}", "💬".bright_black(), session_id);
+                        continue;
+                    }
+                    "/sessions" => {
+                        let (sid, cur, ft) = pick_session(client, project_id.clone(), agent_id.clone()).await?;
+                        session_id = sid; cursor = cur; first_turn = ft;
                         continue;
                     }
                     _ => {}
                 }
 
-                let full_msg = if first_turn {
-                    first_turn = false;
-                    format!("{}\n\n---\n{}", PROTOCOL, trimmed)
-                } else { trimmed };
+                let full_msg = if first_turn { first_turn = false; format!("{}\n\n---\n{}", PROTOCOL, trimmed) } else { trimmed };
                 client.send_message(&session_id, &full_msg).await?;
 
                 loop {
                     client.wait_until_done(&session_id).await?;
                     let msgs = client.get_messages_after(&session_id, cursor).await?;
                     if msgs.is_empty() { break; }
-
                     let mut sent_results = false;
 
                     for m in &msgs {
                         if let MessageRole::Assistant = m.role {
                             let (text, tools) = parse_tool_calls(&m.text);
                             print_assistant(&text);
-
-                            if tools.is_empty() {
-                                if m.cursor > cursor { cursor = m.cursor; }
-                                continue;
-                            }
+                            if tools.is_empty() { if m.cursor > cursor { cursor = m.cursor; } continue; }
 
                             let mut results = Vec::new();
                             for tc in &tools {
                                 let danger = is_dangerous(tc);
                                 print_tool_invoke(tc, danger);
                                 if ask_approve(danger) {
-                                    println!("  └ {}", "✔ running...".bright_green());
+                                    println!("  └ {}", "✔".bright_green());
                                     let result = execute_tool(tc);
-                                    results.push(format!("[Tool \"{}\" result]:\n{}", tc.name, result));
-                                } else {
-                                    println!("  └ {}", "✖ rejected".bright_red());
-                                    results.push(format!("[Tool \"{}\" rejected by user]", tc.name));
-                                }
+                                    results.push(format!("[Tool \"{}\"]\n{}", tc.name, result));
+                                } else { println!("  └ {}", "✖".bright_red()); results.push(format!("[Tool \"{}\" rejected]", tc.name)); }
                             }
-
                             if !results.is_empty() {
                                 sent_results = true;
                                 let combined = results.join("\n\n");
-                                let result_msg = if combined.len() > 100_000 {
-                                    format!("{}...(truncated)", &combined[..100_000])
-                                } else { combined };
-                                client.send_message(&session_id, &result_msg).await?;
+                                let msg = if combined.len() > 100_000 { format!("{}...(truncated)", &combined[..100_000]) } else { combined };
+                                client.send_message(&session_id, &msg).await?;
                             }
                         }
                         if m.cursor > cursor { cursor = m.cursor; }
                     }
-
                     if !sent_results { break; }
                 }
             }
-            Err(rustyline::error::ReadlineError::Interrupted)
-            | Err(rustyline::error::ReadlineError::Eof) => {
-                println!();
-                break;
-            }
-            Err(e) => {
-                print_error(&format!("readline: {e}"));
-                break;
-            }
+            Err(rustyline::error::ReadlineError::Interrupted) | Err(rustyline::error::ReadlineError::Eof) => { println!(); break; }
+            Err(e) => { print_error(&format!("readline: {e}")); break; }
         }
     }
 
@@ -671,62 +564,47 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, agent_i
 }
 
 // ---------------------------------------------------------------------------
-// One-shot mode
+// One-shot
 // ---------------------------------------------------------------------------
 
 async fn run_one_shot(client: &ApiClient, message: &str, project_id: Option<String>, agent_id: Option<String>) -> Result<(), String> {
     let session = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
     let full_msg = format!("{}\n\n---\n{}", PROTOCOL, message);
     client.send_message(&session.id, &full_msg).await?;
-
     let mut cursor = 0i64;
 
     loop {
         client.wait_until_done(&session.id).await?;
         let msgs = client.get_messages_after(&session.id, cursor).await?;
         if msgs.is_empty() { break; }
-
         let mut sent_results = false;
 
         for m in &msgs {
             if let MessageRole::Assistant = m.role {
                 let (text, tools) = parse_tool_calls(&m.text);
                 if !text.is_empty() { println!("{}", text); }
-
                 if !tools.is_empty() {
                     sent_results = true;
                     let mut results = Vec::new();
                     for tc in &tools {
                         let danger = is_dangerous(tc);
                         print_tool_invoke(tc, danger);
-                        if danger {
-                            if !ask_approve(true) {
-                                println!("  └ {} rejected", "✖".bright_red());
-                                results.push(format!("[Tool \"{}\" rejected by user]", tc.name));
-                                continue;
-                            }
-                        }
-                        println!("  └ {}", "✔ running...".bright_green());
-                        let result = execute_tool(tc);
-                        results.push(format!("[Tool \"{}\" result]:\n{}", tc.name, result));
+                        if danger && !ask_approve(true) { println!("  └ {} rejected", "✖".bright_red()); results.push(format!("[Tool \"{}\" rejected]", tc.name)); continue; }
+                        println!("  └ {}", "✔".bright_green());
+                        results.push(format!("[Tool \"{}\"]\n{}", tc.name, execute_tool(tc)));
                     }
-
                     if !results.is_empty() {
                         let combined = results.join("\n\n");
-                        let result_msg = if combined.len() > 100_000 {
-                            format!("{}...(truncated)", &combined[..100_000])
-                        } else { combined };
-                        client.send_message(&session.id, &result_msg).await?;
+                        let msg = if combined.len() > 100_000 { format!("{}...(truncated)", &combined[..100_000]) } else { combined };
+                        client.send_message(&session.id, &msg).await?;
                     }
                 }
             }
             if m.cursor > cursor { cursor = m.cursor; }
         }
-
         let sess = client.get_session(&session.id).await?;
         if !sess.running && !sent_results { break; }
     }
-
     Ok(())
 }
 
@@ -744,7 +622,6 @@ async fn main() {
         Err(e) => { print_error(&e); std::process::exit(1); }
     };
 
-    // Resolve project if given
     let project_id = match &cli.project {
         Some(p) => match client.resolve_project(p).await {
             Ok(id) => Some(id),
@@ -755,14 +632,12 @@ async fn main() {
 
     let result = match cli.message {
         Some(msg) => run_one_shot(&client, &msg, project_id, cli.agent).await,
-        None => run_interactive(&client, project_id, cli.agent).await,
+        None => run_interactive(&client, project_id, cli.session, cli.agent).await,
     };
 
     if let Err(e) = result {
         print_error(&e);
-        if e.contains("401") || e.contains("scope") {
-            eprintln!("  Get an API key at https://attacca.cc/settings and set ATTACCA_API_KEY");
-        }
+        if e.contains("401") || e.contains("scope") { eprintln!("  Get an API key at https://attacca.cc/settings"); }
         std::process::exit(1);
     }
 }
