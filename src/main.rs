@@ -58,6 +58,28 @@ Example:
 - After executing tools, continue your reasoning."#;
 
 // ---------------------------------------------------------------------------
+// UTF-8 safe helpers
+// ---------------------------------------------------------------------------
+
+/// Truncate a string at a UTF-8 char boundary (never mid-char).
+fn safe_truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max { s }
+    else {
+        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+        &s[..end]
+    }
+}
+
+/// Format truncated preview (max chars, UTF-8 safe).
+fn fmt_preview(body: &str, max: usize) -> String {
+    if body.len() > max {
+        format!("{}...", safe_truncate(body, max))
+    } else {
+        body.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
 
@@ -138,7 +160,7 @@ async fn json_or_body<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -
     match serde_json::from_str::<T>(&body) {
         Ok(val) => Ok(val),
         Err(e) => {
-            let preview = if body.len() > 300 { format!("{}...", &body[..300]) } else { body.clone() };
+            let preview = fmt_preview(&body, 300);
             Err(format!("Status: {status}\nJSON decode: {e}\nRaw: {preview}"))
         }
     }
@@ -150,7 +172,7 @@ async fn api_call<T: serde::de::DeserializeOwned>(req: reqwest::RequestBuilder) 
     if status.is_success() { json_or_body::<T>(resp).await }
     else {
         let body = resp.text().await.unwrap_or_default();
-        let preview = if body.len() > 300 { format!("{}...", &body[..300]) } else { body };
+        let preview = fmt_preview(&body, 300);
         Err(format!("HTTP {status}\nResponse: {preview}"))
     }
 }
@@ -215,7 +237,7 @@ fn execute_tool(tc: &ToolCall) -> String {
         "read_file" => {
             let path = tc.args.get("path").unwrap_or(&empty);
             match std::fs::read_to_string(path) {
-                Ok(s) if s.len() > 100_000 => format!("[file too large: {} bytes, first 100k]\n{}", s.len(), &s[..100_000]),
+                Ok(s) if s.len() > 100_000 => format!("[file too large: {} bytes, first 100k]\n{}", s.len(), safe_truncate(&s, 100_000)),
                 Ok(s) => format!("[file content ({} bytes)]:\n{}", s.len(), s),
                 Err(e) => format!("[error: {e}]"),
             }
@@ -280,7 +302,7 @@ fn execute_tool(tc: &ToolCall) -> String {
             let ps = tc.args.get("paths").unwrap_or(&empty);
             let paths: Vec<String> = if ps.starts_with('[') { serde_json::from_str(ps).unwrap_or(vec![ps.clone()]) } else { ps.split(',').map(|s| s.trim().to_string()).collect() };
             let mut r = Vec::new();
-            for p in &paths { match std::fs::read_to_string(p) { Ok(s) => r.push(format!("--- {} ---\n{}", p, s)), Err(e) => r.push(format!("--- {} ---\n[error: {e}]", p)) } }
+            for p in &paths { match std::fs::read_to_string(p) { Ok(s) => r.push(format!("--- {} ---\n{}", p, s)), Err(e) => r.push(format!("--- {} ---\n[error: {}]", p, e)) } }
             r.join("\n")
         }
         other => format!("[unknown: {other}]"),
@@ -296,7 +318,7 @@ fn is_dangerous(tc: &ToolCall) -> bool {
 
 fn format_tool(tc: &ToolCall) -> String {
     let args: Vec<String> = tc.args.iter().map(|(k, v)| {
-        if v.len() > 60 { format!("{}: \"{}...\"", k, &v[..60]) } else { format!("{}: \"{}\"", k, v) }
+        if v.len() > 60 { format!("{}: \"{}...\"", k, safe_truncate(v, 60)) } else { format!("{}: \"{}\"", k, v) }
     }).collect();
     format!("{}({})", tc.name, args.join(", "))
 }
@@ -373,7 +395,7 @@ impl ApiClient {
         let resp = self.inner.post(&url).headers(self.bearer()).json(&body).send().await.map_err(|e| format!("request: {e}"))?;
         let s = resp.status();
         if s.is_success() || s.as_u16() == 202 { Ok(()) }
-        else { let b = resp.text().await.unwrap_or_default(); Err(format!("HTTP {s}\n{}", &b[..b.len().min(300)])) }
+        else { let b = resp.text().await.unwrap_or_default(); Err(format!("HTTP {s}\n{}", fmt_preview(&b, 300))) }
     }
 
     async fn get_session(&self, session_id: &str) -> Result<SessionDto, String> {
@@ -409,7 +431,7 @@ impl ApiClient {
         else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            Err(format!("HTTP {status}\n{}", &body[..body.len().min(200)]))
+            Err(format!("HTTP {status}\n{}", fmt_preview(&body, 200)))
         }
     }
 
@@ -433,7 +455,7 @@ impl ApiClient {
                 Ok(r) => {
                     let status = r.status();
                     let body = r.text().await.unwrap_or_default();
-                    let preview = if body.len() > 100 { format!("{}...", &body[..100]) } else { body };
+                    let preview = fmt_preview(&body, 100);
                     if status.is_success() {
                         println!("{}", "✅".bright_green());
                         if self.debug { println!("  └ {}", preview.bright_black()); }
@@ -463,7 +485,7 @@ impl ApiClient {
                 } else {
                     let body = r.text().await.unwrap_or_default();
                     println!("{} HTTP {}", "❌".bright_red(), status);
-                    println!("  └ {}", &body[..body.len().min(200)]);
+                    println!("  └ {}", fmt_preview(&body, 200));
                 }
             }
             Err(e) => println!("{} {e}", "💥".bright_red()),
@@ -729,7 +751,7 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                     first_turn = false;
                     // Use first message as session title
                     let session_name = trimmed.split_whitespace().take(5).collect::<Vec<_>>().join(" ");
-                    let name = if session_name.len() > 40 { format!("{}...", &session_name[..37]) } else { session_name };
+                    let name = if session_name.len() > 40 { format!("{}...", safe_truncate(&session_name, 37)) } else { session_name };
                     let _ = client.rename_session(&session_id, &name).await;
                     format!("{}\n\n---\n{}", PROTOCOL, trimmed)
                 } else { trimmed };
@@ -739,45 +761,54 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                 }
 
                 'tool_loop: loop {
-                    if let Err(e) = client.wait_until_done(&session_id).await {
-                        print_error(&e); break;
-                    }
-                    let msgs = match client.get_messages_after(&session_id, cursor).await {
-                        Ok(m) => m,
-                        Err(e) => { print_error(&e); break; }
-                    };
-                    if msgs.is_empty() { break; }
-                    let mut sent_results = false;
+                    // Stream: poll for new messages every 500ms, display immediately
+                    loop {
+                        let msgs = match client.get_messages_after(&session_id, cursor).await {
+                            Ok(m) => m,
+                            Err(e) => { print_error(&e); break 'tool_loop; }
+                        };
+                        let mut had_tools = false;
 
-                    for m in &msgs {
-                        if let MessageRole::Assistant = m.role {
-                            let (text, tools) = parse_tool_calls(&m.text);
-                            print_assistant(&text);
-                            if tools.is_empty() { if m.cursor > cursor { cursor = m.cursor; } continue; }
+                        for m in &msgs {
+                            if let MessageRole::Assistant = m.role {
+                                let (text, tools) = parse_tool_calls(&m.text);
+                                if !text.is_empty() { print_assistant(&text); }
 
-                            let mut results = Vec::new();
-                            for tc in &tools {
-                                let danger = is_dangerous(tc);
-                                print_tool_invoke(tc, danger);
-                                if ask_approve(danger) {
-                                    println!("  └ {}", "✔".bright_green());
-                                    let result = execute_tool(tc);
-                                    results.push(format!("[Tool \"{}\"]\n{}", tc.name, result));
-                                } else { println!("  └ {}", "✖".bright_red()); results.push(format!("[Tool \"{}\" rejected]", tc.name)); }
-                            }
-                            if !results.is_empty() {
-                                sent_results = true;
-                                let combined = results.join("\n\n");
-                                let msg = if combined.len() > 100_000 { format!("{}...(truncated)", &combined[..100_000]) } else { combined };
-                                if let Err(e) = client.send_message(&session_id, &msg).await {
-                                    print_error(&format!("send result: {e}"));
-                                    break 'tool_loop;
+                                if !tools.is_empty() {
+                                    had_tools = true;
+                                    let mut results = Vec::new();
+                                    for tc in &tools {
+                                        let danger = is_dangerous(tc);
+                                        print_tool_invoke(tc, danger);
+                                        if ask_approve(danger) {
+                                            println!("  └ {}", "✔".bright_green());
+                                            results.push(format!("[Tool \"{}\"]\n{}", tc.name, execute_tool(tc)));
+                                        } else { println!("  └ {}", "✖".bright_red()); results.push(format!("[Tool \"{}\" rejected]", tc.name)); }
+                                    }
+                                    if !results.is_empty() {
+                                        let combined = results.join("\n\n");
+                                        let msg = if combined.len() > 100_000 { format!("{}...(truncated)", safe_truncate(&combined, 100_000)) } else { combined };
+                                        if let Err(e) = client.send_message(&session_id, &msg).await {
+                                            print_error(&format!("send result: {e}"));
+                                            break 'tool_loop;
+                                        }
+                                    }
                                 }
                             }
+                            if m.cursor > cursor { cursor = m.cursor; }
                         }
-                        if m.cursor > cursor { cursor = m.cursor; }
+
+                        if had_tools { continue; } // re-poll immediately
+
+                        // Check session status
+                        let sess = match client.get_session(&session_id).await {
+                            Ok(s) => s,
+                            Err(_) => break 'tool_loop,
+                        };
+                        if !sess.running { break 'tool_loop; }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                    if !sent_results { break; }
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted) | Err(rustyline::error::ReadlineError::Eof) => { println!(); break; }
@@ -801,17 +832,15 @@ async fn run_one_shot(client: &ApiClient, message: &str, project_id: Option<Stri
     let mut cursor = 0i64;
 
     loop {
-        client.wait_until_done(&session.id).await?;
         let msgs = client.get_messages_after(&session.id, cursor).await?;
-        if msgs.is_empty() { break; }
-        let mut sent_results = false;
+        let mut had_tools = false;
 
         for m in &msgs {
             if let MessageRole::Assistant = m.role {
                 let (text, tools) = parse_tool_calls(&m.text);
                 if !text.is_empty() { println!("{}", text); }
                 if !tools.is_empty() {
-                    sent_results = true;
+                    had_tools = true;
                     let mut results = Vec::new();
                     for tc in &tools {
                         let danger = is_dangerous(tc);
@@ -822,15 +851,19 @@ async fn run_one_shot(client: &ApiClient, message: &str, project_id: Option<Stri
                     }
                     if !results.is_empty() {
                         let combined = results.join("\n\n");
-                        let msg = if combined.len() > 100_000 { format!("{}...(truncated)", &combined[..100_000]) } else { combined };
+                        let msg = if combined.len() > 100_000 { format!("{}...(truncated)", safe_truncate(&combined, 100_000)) } else { combined };
                         client.send_message(&session.id, &msg).await?;
                     }
                 }
             }
             if m.cursor > cursor { cursor = m.cursor; }
         }
+
+        if had_tools { continue; }
+
         let sess = client.get_session(&session.id).await?;
-        if !sess.running && !sent_results { break; }
+        if !sess.running { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     Ok(())
 }
