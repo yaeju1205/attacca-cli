@@ -399,6 +399,20 @@ impl ApiClient {
     }
 
     /// Diagnose: test all major API endpoints
+    async fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let url = self.url(&format!("/v1/sessions/{session_id}"));
+        self.log(&format!("PATCH {url}"));
+        let resp = self.inner.patch(&url).headers(self.bearer())
+            .json(&serde_json::json!({"title": title}))
+            .send().await.map_err(|e| format!("request: {e}"))?;
+        if resp.status().is_success() { Ok(()) }
+        else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("HTTP {status}\n{}", &body[..body.len().min(200)]))
+        }
+    }
+
     async fn diagnose(&self) {
         println!("\n{} Diagnostics:", "🔍".bright_cyan());
         println!("  API URL: {}", self.base_url);
@@ -590,7 +604,7 @@ async fn pick_session(client: &ApiClient, project_id: Option<String>, agent_id: 
         let title = if s.title.is_empty() { "(untitled)" } else { &s.title };
         let age = fmt_time(&s.updated_at);
         let sid = short_id(&s.id);
-        println!("  {}. {} [{}] {} — {}", (i + 1).to_string().bright_green(), "💬".bright_black(), sid, title.bold(), age.bright_black());
+        println!("  {}. {} {} — {} [{}]", (i + 1).to_string().bright_green(), "💬".bright_black(), title.bold().bright_cyan(), age.bright_black(), sid.bright_black());
     }
     if count < settled.len() { println!("  ... and {} older sessions", settled.len() - count); }
 
@@ -681,10 +695,18 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                     }
                     "/quit" | "/exit" => break,
                     "/new" => {
+                        // Support "/new Session Name" syntax
+                        let rest = trimmed[4..].trim();
                         match client.create_session(project_id.as_deref(), agent_id.as_deref()).await {
                             Ok(s) => { session_id = s.id; cursor = 0; first_turn = true;
                                 let title = if s.title.is_empty() { "(untitled)" } else { &s.title };
-                                println!("{} New session: {} ({})", "💬".bright_black(), session_id, title.bold()); }
+                                println!("{} New session: {} ({})", "💬".bright_black(), session_id, title.bold());
+                                // If user gave a name, rename
+                                if !rest.is_empty() {
+                                    let _ = client.rename_session(&session_id, rest).await;
+                                    println!("  └ {}", format!("Renamed to \"{rest}\"").bright_black());
+                                }
+                            }
                             Err(e) => { print_error(&format!("create session: {e}")); }
                         }
                         continue;
@@ -703,7 +725,14 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                     _ => {}
                 }
 
-                let full_msg = if first_turn { first_turn = false; format!("{}\n\n---\n{}", PROTOCOL, trimmed) } else { trimmed };
+                let full_msg = if first_turn {
+                    first_turn = false;
+                    // Use first message as session title
+                    let session_name = trimmed.split_whitespace().take(5).collect::<Vec<_>>().join(" ");
+                    let name = if session_name.len() > 40 { format!("{}...", &session_name[..37]) } else { session_name };
+                    let _ = client.rename_session(&session_id, &name).await;
+                    format!("{}\n\n---\n{}", PROTOCOL, trimmed)
+                } else { trimmed };
                 if let Err(e) = client.send_message(&session_id, &full_msg).await {
                     print_error(&format!("send: {e}"));
                     continue;
