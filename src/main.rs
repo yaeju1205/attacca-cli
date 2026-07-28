@@ -95,7 +95,7 @@ struct MeDto {
     scopes: Vec<String>,
 }
 
-/// Wrapper that shows the raw body on deserialization failure.
+/// Wrapper that parses JSON or shows raw body.
 async fn json_or_body<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, String> {
@@ -104,15 +104,30 @@ async fn json_or_body<T: serde::de::DeserializeOwned>(
     match serde_json::from_str::<T>(&body) {
         Ok(val) => Ok(val),
         Err(e) => {
-            let preview = if body.len() > 500 {
-                format!("{}...", &body[..500])
+            let preview = if body.len() > 300 {
+                format!("{}...", &body[..300])
             } else {
                 body.clone()
             };
             Err(format!(
-                "JSON decode error: {e}\nStatus: {status}\nBody preview: {preview}"
+                "Status: {status}\nJSON decode: {e}\nRaw: {preview}"
             ))
         }
+    }
+}
+
+/// Call an API endpoint; on failure shows the raw status + body.
+async fn api_call<T: serde::de::DeserializeOwned>(
+    req: reqwest::RequestBuilder,
+) -> Result<T, String> {
+    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        json_or_body::<T>(resp).await
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        let preview = if body.len() > 300 { format!("{}...", &body[..300]) } else { body };
+        Err(format!("HTTP {status}\nResponse: {preview}"))
     }
 }
 
@@ -370,70 +385,40 @@ impl ApiClient {
     }
 
     async fn get_me(&self) -> Result<MeDto, String> {
-        let resp = self.inner.get(self.url("/v1/me"))
-            .headers(self.bearer_header())
-            .send().await.map_err(|e| format!("request: {e}"))?;
-        if resp.status().is_success() {
-            json_or_body::<MeDto>(resp).await
-        } else {
-            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
-            Err(format!("{:?}: {:?}", err.code, err.message))
-        }
+        api_call(self.inner.get(self.url("/v1/me")).headers(self.bearer_header())).await
     }
 
     async fn create_session(&self) -> Result<SessionDto, String> {
-        let body = serde_json::json!({"title": "attacca-cli"});
-        let resp = self.inner.post(self.url("/v1/sessions"))
-            .headers(self.bearer_header())
-            .json(&body)
-            .send().await.map_err(|e| format!("request: {e}"))?;
-        if resp.status().is_success() {
-            json_or_body::<SessionDto>(resp).await
-        } else {
-            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
-            Err(format!("{:?}: {:?}", err.code, err.message))
-        }
+        api_call(
+            self.inner.post(self.url("/v1/sessions"))
+                .headers(self.bearer_header())
+                .json(&serde_json::json!({"title": "attacca-cli"})),
+        ).await
     }
 
     async fn send_message(&self, session_id: &str, msg: &str) -> Result<(), String> {
-        let body = serde_json::json!({"message": msg, "timezone": "Asia/Seoul"});
         let resp = self.inner.post(self.url(&format!("/v1/sessions/{session_id}/messages")))
             .headers(self.bearer_header())
-            .json(&body)
+            .json(&serde_json::json!({"message": msg, "timezone": "Asia/Seoul"}))
             .send().await.map_err(|e| format!("request: {e}"))?;
         let status = resp.status();
         if status.is_success() || status.as_u16() == 202 {
             Ok(())
         } else {
-            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
-            Err(format!("{:?}: {:?}", err.code, err.message))
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("HTTP {status}\nBody: {}", &body[..body.len().min(300)]))
         }
     }
 
     async fn get_session(&self, session_id: &str) -> Result<SessionDto, String> {
-        let resp = self.inner.get(self.url(&format!("/v1/sessions/{session_id}")))
-            .headers(self.bearer_header())
-            .send().await.map_err(|e| format!("request: {e}"))?;
-        if resp.status().is_success() {
-            json_or_body::<SessionDto>(resp).await
-        } else {
-            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
-            Err(format!("{:?}: {:?}", err.code, err.message))
-        }
+        api_call(self.inner.get(self.url(&format!("/v1/sessions/{session_id}"))).headers(self.bearer_header())).await
     }
 
     async fn get_messages_after(&self, session_id: &str, after: i64) -> Result<Vec<MessageDto>, String> {
-        let url = self.url(&format!("/v1/sessions/{session_id}/messages?after={after}"));
-        let resp = self.inner.get(&url).headers(self.bearer_header())
-            .send().await.map_err(|e| format!("request: {e}"))?;
-        if resp.status().is_success() {
-            let mut msgs: Vec<MessageDto> = json_or_body(resp).await?;
-            msgs.reverse();
-            Ok(msgs)
-        } else {
-            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
-            Err(format!("{:?}: {:?}", err.code, err.message))
-        }
+        api_call(
+            self.inner.get(self.url(&format!("/v1/sessions/{session_id}/messages?after={after}")))
+                .headers(self.bearer_header()),
+        ).await.map(|mut msgs: Vec<MessageDto>| { msgs.reverse(); msgs })
     }
 
     async fn wait_until_done(&self, session_id: &str) -> Result<(), String> {
