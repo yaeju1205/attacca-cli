@@ -46,37 +46,74 @@ Example:
 // DTOs
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct SessionDto {
     id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
     running: bool,
 }
 
 #[derive(Deserialize)]
 struct MessageDto {
+    #[serde(default)]
     role: MessageRole,
+    #[serde(default)]
     text: String,
+    #[serde(default)]
     cursor: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 enum MessageRole {
+    #[default]
     User,
     Assistant,
     System,
+    Tool,
+    #[serde(other)]
+    Unknown,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct ErrorDto {
-    code: String,
-    message: String,
+    code: Option<String>,
+    message: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct MeDto {
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
     display_name: String,
+    #[serde(default)]
     email: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+/// Wrapper that shows the raw body on deserialization failure.
+async fn json_or_body<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, String> {
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    match serde_json::from_str::<T>(&body) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            let preview = if body.len() > 500 {
+                format!("{}...", &body[..500])
+            } else {
+                body.clone()
+            };
+            Err(format!(
+                "JSON decode error: {e}\nStatus: {status}\nBody preview: {preview}"
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,10 +360,10 @@ impl ApiClient {
             .headers(self.bearer_header())
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
-            resp.json().await.map_err(|e| format!("json: {e}"))
+            json_or_body::<MeDto>(resp).await
         } else {
-            let err: ErrorDto = resp.json().await.map_err(|_| "unknown error".to_string())?;
-            Err(format!("{}: {}", err.code, err.message))
+            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
+            Err(format!("{:?}: {:?}", err.code, err.message))
         }
     }
 
@@ -337,10 +374,10 @@ impl ApiClient {
             .json(&body)
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
-            resp.json().await.map_err(|e| format!("json: {e}"))
+            json_or_body::<SessionDto>(resp).await
         } else {
-            let err: ErrorDto = resp.json().await.map_err(|_| "unknown error".to_string())?;
-            Err(format!("{}: {}", err.code, err.message))
+            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
+            Err(format!("{:?}: {:?}", err.code, err.message))
         }
     }
 
@@ -354,8 +391,8 @@ impl ApiClient {
         if status.is_success() || status.as_u16() == 202 {
             Ok(())
         } else {
-            let err: ErrorDto = resp.json().await.map_err(|_| "unknown error".to_string())?;
-            Err(format!("{}: {}", err.code, err.message))
+            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
+            Err(format!("{:?}: {:?}", err.code, err.message))
         }
     }
 
@@ -364,10 +401,10 @@ impl ApiClient {
             .headers(self.bearer_header())
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
-            resp.json().await.map_err(|e| format!("json: {e}"))
+            json_or_body::<SessionDto>(resp).await
         } else {
-            let err: ErrorDto = resp.json().await.map_err(|_| "unknown error".to_string())?;
-            Err(format!("{}: {}", err.code, err.message))
+            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
+            Err(format!("{:?}: {:?}", err.code, err.message))
         }
     }
 
@@ -376,12 +413,12 @@ impl ApiClient {
         let resp = self.inner.get(&url).headers(self.bearer_header())
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
-            let mut msgs: Vec<MessageDto> = resp.json().await.map_err(|e| format!("json: {e}"))?;
+            let mut msgs: Vec<MessageDto> = json_or_body(resp).await?;
             msgs.reverse();
             Ok(msgs)
         } else {
-            let err: ErrorDto = resp.json().await.map_err(|_| "unknown error".to_string())?;
-            Err(format!("{}: {}", err.code, err.message))
+            let err = json_or_body::<ErrorDto>(resp).await.unwrap_or_default();
+            Err(format!("{:?}: {:?}", err.code, err.message))
         }
     }
 
@@ -399,7 +436,7 @@ impl ApiClient {
 // ---------------------------------------------------------------------------
 
 fn print_error(msg: &str) {
-    eprintln!("{} {msg}", "✖".bright_red());
+    eprintln!("✖ {}", msg.bright_red());
 }
 
 fn print_banner(me: &MeDto) {
