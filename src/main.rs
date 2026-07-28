@@ -12,13 +12,14 @@ use rustyline::validate::{self, Validator};
 use rustyline::history::DefaultHistory;
 use rustyline::{Context, Helper};
 use rustyline::{Editor, Result as RlResult};
-use std::borrow::Cow::{self, Borrowed, Owned};
 use std::collections::HashMap;
 
 const PROTOCOL: &str = r#"## attacca-cli bridge protocol
 
 You are connected to the user's **local computer** through attacca-cli. To
 interact with it, output JSON tool calls inside ```attacca-tool blocks.
+You can output MULTIPLE tool calls in the same response -- they run in
+sequence, each getting its result sent back.
 
 Example:
 ```attacca-tool
@@ -33,19 +34,20 @@ Example:
 | write_file | path, content | Write a new file or overwrite |
 | edit_file | path, old_string, new_string | Find-and-replace in a file |
 | list_dir | path | List a directory |
-| run_command | command | Run a shell command |
+| run_command | command | Run ANY shell command (use for grep, find, cat, ls, mkdir, cp, mv, wc, diff, sort, head, tail, sed, awk, etc.) |
 | create_dir | path | Create a directory |
 | file_exists | path | Check a file exists |
 | delete_file | path | Delete a file or empty dir |
-| read_files | paths[] | Batch read multiple files |
+| read_files | paths[] | Batch read MULTIPLE files at once |
+| batch_read | paths[] | Alias for read_files |
 
 ### Rules
-1. Output ONE tool call per ```attacca-tool block.
-2. You can output text AND tool calls in the same response.
-3. After I send back the tool result, continue your reasoning.
-4. When the task is complete, state it clearly.
-5. Do NOT invent files or guess contents -- always use a tool.
-6. Never explain what you would do -- actually do it with a tool."#;
+1. Plan ahead: read ALL needed files first before writing anything.
+2. Use run_command with grep, find, glob patterns for searching.
+3. Use read_files to batch-read many files at once.
+4. After getting results, continue your reasoning directly.
+5. Do NOT invent file contents -- always read them first.
+6. Do NOT explain what you would do -- actually do it with tools."#;
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -432,11 +434,10 @@ impl Completer for SlashHelper {
             .iter()
             .filter(|(cmd, _)| cmd.starts_with(trimmed))
             .map(|(cmd, desc)| Pair {
-                display: format!("{}  — {}", cmd.bright_cyan(), desc.bright_black()),
+                display: format!("{} ( {})", cmd, desc),
                 replacement: format!("{} ", cmd),
             })
             .collect();
-        // Start from the first '/'
         let start_pos = line.find('/').unwrap_or(pos);
         Ok((start_pos, candidates))
     }
@@ -444,22 +445,12 @@ impl Completer for SlashHelper {
 
 impl Hinter for SlashHelper {
     type Hint = String;
-
-    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        if !line.starts_with('/') { return None; }
-        SLASH_COMMANDS.iter().find(|(cmd, _)| cmd.starts_with(line.trim_start()) && cmd.len() > line.trim_start().len())
-            .map(|(cmd, _)| cmd[pos..].to_string())
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        None // skip hints for now, focus on completing
     }
 }
 
-impl Highlighter for SlashHelper {
-    fn highlight_hint<'a>(&self, hint: &'a str) -> Cow<'a, str> {
-        Owned(hint.bright_black().to_string())
-    }
-    fn highlight<'a>(&self, line: &'a str, _pos: usize) -> Cow<'a, str> {
-        if line.starts_with('/') { Owned(line.bright_cyan().to_string()) } else { Borrowed(line) }
-    }
-}
+impl Highlighter for SlashHelper {}
 
 impl Validator for SlashHelper {
     fn validate(&self, _ctx: &mut validate::ValidationContext) -> RlResult<validate::ValidationResult> {
