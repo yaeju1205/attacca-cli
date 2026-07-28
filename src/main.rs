@@ -327,11 +327,12 @@ fn format_tool(tc: &ToolCall) -> String {
 // API client
 // ---------------------------------------------------------------------------
 
-const BASE_URL: &str = "https://attacca.cc";
+const DEFAULT_API_URL: &str = "https://attacca.cc";
 
 struct ApiClient {
     inner: Client,
     key: String,
+    base_url: String,
 }
 
 impl ApiClient {
@@ -339,11 +340,12 @@ impl ApiClient {
         let key = std::env::var("ATTACCA_API_KEY").map_err(|_| {
             "Set ATTACCA_API_KEY (get one at attacca.cc > Settings > API keys)".to_string()
         })?;
+        let base_url = std::env::var("ATTACCA_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
         let inner = Client::builder()
             .user_agent("attacca-cli/0.1.0")
             .build()
             .map_err(|e| format!("reqwest: {e}"))?;
-        Ok(Self { inner, key })
+        Ok(Self { inner, key, base_url })
     }
 
     fn bearer_header(&self) -> reqwest::header::HeaderMap {
@@ -352,11 +354,23 @@ impl ApiClient {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", self.key).parse().unwrap(),
         );
+        // Force JSON response — some deployments return SPA HTML without this
+        h.insert(
+            reqwest::header::ACCEPT,
+            "application/json".parse().unwrap(),
+        );
         h
     }
 
+    fn url(&self, path: &str) -> String {
+        // If base_url already has a path prefix, don't double it
+        let base = self.base_url.trim_end_matches('/');
+        let p = path.trim_start_matches('/');
+        format!("{base}/{p}")
+    }
+
     async fn get_me(&self) -> Result<MeDto, String> {
-        let resp = self.inner.get(format!("{BASE_URL}/v1/me"))
+        let resp = self.inner.get(self.url("/v1/me"))
             .headers(self.bearer_header())
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
@@ -369,7 +383,7 @@ impl ApiClient {
 
     async fn create_session(&self) -> Result<SessionDto, String> {
         let body = serde_json::json!({"title": "attacca-cli"});
-        let resp = self.inner.post(format!("{BASE_URL}/v1/sessions"))
+        let resp = self.inner.post(self.url("/v1/sessions"))
             .headers(self.bearer_header())
             .json(&body)
             .send().await.map_err(|e| format!("request: {e}"))?;
@@ -383,7 +397,7 @@ impl ApiClient {
 
     async fn send_message(&self, session_id: &str, msg: &str) -> Result<(), String> {
         let body = serde_json::json!({"message": msg, "timezone": "Asia/Seoul"});
-        let resp = self.inner.post(format!("{BASE_URL}/v1/sessions/{session_id}/messages"))
+        let resp = self.inner.post(self.url(&format!("/v1/sessions/{session_id}/messages")))
             .headers(self.bearer_header())
             .json(&body)
             .send().await.map_err(|e| format!("request: {e}"))?;
@@ -397,7 +411,7 @@ impl ApiClient {
     }
 
     async fn get_session(&self, session_id: &str) -> Result<SessionDto, String> {
-        let resp = self.inner.get(format!("{BASE_URL}/v1/sessions/{session_id}"))
+        let resp = self.inner.get(self.url(&format!("/v1/sessions/{session_id}")))
             .headers(self.bearer_header())
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
@@ -409,7 +423,7 @@ impl ApiClient {
     }
 
     async fn get_messages_after(&self, session_id: &str, after: i64) -> Result<Vec<MessageDto>, String> {
-        let url = format!("{BASE_URL}/v1/sessions/{session_id}/messages?after={after}");
+        let url = self.url(&format!("/v1/sessions/{session_id}/messages?after={after}"));
         let resp = self.inner.get(&url).headers(self.bearer_header())
             .send().await.map_err(|e| format!("request: {e}"))?;
         if resp.status().is_success() {
