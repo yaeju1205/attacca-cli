@@ -114,3 +114,52 @@ pub fn short(s: &str) -> String {
         s.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_tools_empty() {
+        let (text, tools) = parse_tools("hello world");
+        assert_eq!(text, "hello world");
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_parse_tools_single() {
+        let (text, tools) = parse_tools("say hi\n```attacca-tool\n{\"tool\":\"read_file\",\"args\":{\"path\":\"x\"}}\n```\nok");
+        assert!(text.contains("say hi"));
+        assert!(text.contains("ok"));
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].contains("\"read_file\""));
+    }
+
+    #[test]
+    fn test_parse_tools_multiple() {
+        let input = "a\n```attacca-tool\n{\"tool\":\"read_file\",\"args\":{\"path\":\"x\"}}\n```\nb\n```attacca-tool\n{\"tool\":\"list_dir\",\"args\":{\"path\":\".\"}}\n```\nc";
+        let (text, tools) = parse_tools(input);
+        assert!(text.contains("a"));
+        assert!(text.contains("b"));
+        assert!(text.contains("c"));
+        assert_eq!(tools.len(), 2);
+    }
+
+    #[test]
+    fn test_short() {
+        assert_eq!(short("abc12345def67890"), "abc12345");
+        assert_eq!(short("abc"), "abc");
+    }
+
+    #[test]
+    fn test_exec_unknown_tool() {
+        let result = exec_tool(r#"{"tool":"nonexistent","args":{}}"#);
+        assert!(result.contains("unknown"));
+    }
+
+    #[test]
+    fn test_exec_missing_tool() {
+        let result = exec_tool(r#"{}"#);
+        assert!(result.contains("unknown"));
+    }
+}

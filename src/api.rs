@@ -9,7 +9,6 @@ pub struct Api {
     pub base: String,
 }
 
-/// Result of an API call: (status_code, body_string)
 pub type ApiResult = Result<String, (u16, String)>;
 
 impl Api {
@@ -24,10 +23,21 @@ impl Api {
         Self { inner, key, base }
     }
 
+    /// Build URL from path.
+    ///
+    /// OpenAPI paths start with `/v1/` (e.g. `/v1/me`, `/v1/sessions`).
+    /// If the user's base URL already includes `/v1` (e.g. `https://attacca.cc/api/v1`),
+    /// we strip the `/v1` prefix from the path to avoid doubling:
+    ///   `https://attacca.cc/api/v1` + `/v1/me` → `https://attacca.cc/api/v1/me`
     pub fn url(&self, path: &str) -> String {
         let b = self.base.trim_end_matches('/');
         let p = path.trim_start_matches('/');
-        format!("{b}/{p}")
+        // If base ends with /v1 and path starts with v1/, remove the v1/ from path
+        if b.ends_with("/v1") && p.starts_with("v1/") {
+            format!("{b}/{}", &p[3..])
+        } else {
+            format!("{b}/{p}")
+        }
     }
 
     fn headers(&self) -> reqwest::header::HeaderMap {
@@ -37,7 +47,7 @@ impl Api {
         h
     }
 
-    /// GET request. Returns (body) or (status, body).
+    /// GET request. Returns body string or (status, body).
     pub async fn get(&self, path: &str) -> ApiResult {
         let url = self.url(path);
         let resp = self.inner.get(&url).headers(self.headers()).send().await;
@@ -51,7 +61,7 @@ impl Api {
         }
     }
 
-    /// POST JSON body. Returns (body) or (status, body).
+    /// POST JSON body. Returns body string or (status, body).
     pub async fn post(&self, path: &str, json: &Value) -> ApiResult {
         let url = self.url(path);
         let resp = self.inner.post(&url).headers(self.headers()).json(json).send().await;
@@ -65,56 +75,47 @@ impl Api {
         }
     }
 
-    /// Probe multiple URL patterns to find the right base URL.
-    /// Returns (base_url, identity_string) on success.
+    /// Probe various URL patterns to find the correct API endpoint.
     pub async fn diagnose(&self) -> Vec<ProbeResult> {
-        let bases = [
-            self.base.as_str(),
-            "https://attacca.cc",
-            "https://attacca.cc/api/v1",
+        let combos = [
+            ("https://attacca.cc", "/v1/me"),
+            ("https://attacca.cc", "/v1/sessions"),
+            ("https://attacca.cc/v1", "/me"),
+            ("https://attacca.cc/v1", "/sessions"),
+            ("https://attacca.cc/api/v1", "/v1/me"),
+            ("https://attacca.cc/api/v1", "/v1/sessions"),
+            ("https://attacca.cc/api", "/v1/me"),
+            ("https://attacca.cc/api", "/v1/sessions"),
         ];
-        let paths = ["/v1/me", "/v1/sessions"];
 
         let mut out = Vec::new();
-        for base in &bases {
-            for path in &paths {
-                let url = format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'));
-                let resp = self.inner.get(&url).headers(self.headers()).send().await;
-                let (status, body, note) = match resp {
-                    Ok(r) => {
-                        let s = r.status().as_u16();
-                        let b = r.text().await.unwrap_or_default();
-                        let note = if s == 200 { "✓" } else { "" };
-                        (s, b.chars().take(80).collect::<String>(), note)
-                    }
-                    Err(e) => (0, format!("{e}"), ""),
-                };
-                out.push(ProbeResult {
-                    url,
-                    status,
-                    preview: body,
-                    ok: note == "✓",
-                });
-            }
+        for &(base, path) in &combos {
+            let url = format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'));
+            let resp = self.inner.get(&url).headers(self.headers()).send().await;
+            let (status, body, ok) = match resp {
+                Ok(r) => {
+                    let s = r.status().as_u16();
+                    let b = r.text().await.unwrap_or_default();
+                    (s, b.chars().take(80).collect::<String>(), s == 200)
+                }
+                Err(e) => (0, format!("{e}"), false),
+            };
+            out.push(ProbeResult { url, status, preview: body, ok });
         }
         out
     }
 
-    /// Simple health check. Returns display name if successful.
+    /// Simple health check.
     pub async fn whoami(&self) -> String {
         match self.get("/v1/me").await {
             Ok(body) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                    let name = v["display_name"].as_str().unwrap_or("?");
-                    format!("✓ {name}")
+                    format!("✓ {}", v["display_name"].as_str().unwrap_or("?"))
                 } else {
-                    format!("✓ (unexpected response)")
+                    format!("✓ (unexpected: {body})")
                 }
             }
-            Err((s, b)) => {
-                let preview = b.chars().take(60).collect::<String>();
-                format!("✖ HTTP {s}: {preview}")
-            }
+            Err((s, b)) => format!("✖ HTTP {s}: {}", b.chars().take(60).collect::<String>()),
         }
     }
 }
@@ -124,4 +125,37 @@ pub struct ProbeResult {
     pub status: u16,
     pub preview: String,
     pub ok: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_plain_base() {
+        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc".into() };
+        assert_eq!(api.url("/v1/me"), "https://attacca.cc/v1/me");
+        assert_eq!(api.url("/v1/sessions"), "https://attacca.cc/v1/sessions");
+    }
+
+    #[test]
+    fn test_url_with_v1_suffix() {
+        // When base ends with /v1, strip /v1/ from path to avoid /v1/v1/
+        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/api/v1".into() };
+        assert_eq!(api.url("/v1/me"), "https://attacca.cc/api/v1/me");
+        assert_eq!(api.url("/v1/sessions"), "https://attacca.cc/api/v1/sessions");
+    }
+
+    #[test]
+    fn test_url_with_v1_prefix() {
+        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/v1".into() };
+        assert_eq!(api.url("/v1/me"), "https://attacca.cc/v1/me");
+        assert_eq!(api.url("/v1/sessions"), "https://attacca.cc/v1/sessions");
+    }
+
+    #[test]
+    fn test_url_trailing_slash() {
+        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/".into() };
+        assert_eq!(api.url("/v1/me"), "https://attacca.cc/v1/me");
+    }
 }
