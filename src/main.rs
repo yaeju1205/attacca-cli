@@ -761,54 +761,46 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                 }
 
                 'tool_loop: loop {
-                    // Stream: poll for new messages every 500ms, display immediately
-                    loop {
-                        let msgs = match client.get_messages_after(&session_id, cursor).await {
-                            Ok(m) => m,
-                            Err(e) => { print_error(&e); break 'tool_loop; }
-                        };
-                        let mut had_tools = false;
+                    // Wait for agent to finish processing
+                    if let Err(e) = client.wait_until_done(&session_id).await {
+                        print_error(&e); break;
+                    }
+                    let msgs = match client.get_messages_after(&session_id, cursor).await {
+                        Ok(m) => m,
+                        Err(e) => { print_error(&e); break; }
+                    };
+                    if msgs.is_empty() { break; }
+                    let mut sent_results = false;
 
-                        for m in &msgs {
-                            if let MessageRole::Assistant = m.role {
-                                let (text, tools) = parse_tool_calls(&m.text);
-                                if !text.is_empty() { print_assistant(&text); }
+                    for m in &msgs {
+                        if let MessageRole::Assistant = m.role {
+                            let (text, tools) = parse_tool_calls(&m.text);
+                            if !text.is_empty() { print_assistant(&text); }
 
-                                if !tools.is_empty() {
-                                    had_tools = true;
-                                    let mut results = Vec::new();
-                                    for tc in &tools {
-                                        let danger = is_dangerous(tc);
-                                        print_tool_invoke(tc, danger);
-                                        if ask_approve(danger) {
-                                            println!("  └ {}", "✔".bright_green());
-                                            results.push(format!("[Tool \"{}\"]\n{}", tc.name, execute_tool(tc)));
-                                        } else { println!("  └ {}", "✖".bright_red()); results.push(format!("[Tool \"{}\" rejected]", tc.name)); }
-                                    }
-                                    if !results.is_empty() {
-                                        let combined = results.join("\n\n");
-                                        let msg = if combined.len() > 100_000 { format!("{}...(truncated)", safe_truncate(&combined, 100_000)) } else { combined };
-                                        if let Err(e) = client.send_message(&session_id, &msg).await {
-                                            print_error(&format!("send result: {e}"));
-                                            break 'tool_loop;
-                                        }
+                            if !tools.is_empty() {
+                                sent_results = true;
+                                let mut results = Vec::new();
+                                for tc in &tools {
+                                    let danger = is_dangerous(tc);
+                                    print_tool_invoke(tc, danger);
+                                    if ask_approve(danger) {
+                                        println!("  └ {}", "✔".bright_green());
+                                        results.push(format!("[Tool \"{}\"]\n{}", tc.name, execute_tool(tc)));
+                                    } else { println!("  └ {}", "✖".bright_red()); results.push(format!("[Tool \"{}\" rejected]", tc.name)); }
+                                }
+                                if !results.is_empty() {
+                                    let combined = results.join("\n\n");
+                                    let msg = if combined.len() > 100_000 { format!("{}...(truncated)", safe_truncate(&combined, 100_000)) } else { combined };
+                                    if let Err(e) = client.send_message(&session_id, &msg).await {
+                                        print_error(&format!("send result: {e}"));
+                                        break 'tool_loop;
                                     }
                                 }
                             }
-                            if m.cursor > cursor { cursor = m.cursor; }
                         }
-
-                        if had_tools { continue; } // re-poll immediately
-
-                        // Check session status
-                        let sess = match client.get_session(&session_id).await {
-                            Ok(s) => s,
-                            Err(_) => break 'tool_loop,
-                        };
-                        if !sess.running { break 'tool_loop; }
-
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if m.cursor > cursor { cursor = m.cursor; }
                     }
+                    if !sent_results { break; }
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted) | Err(rustyline::error::ReadlineError::Eof) => { println!(); break; }
