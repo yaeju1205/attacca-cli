@@ -165,6 +165,9 @@ struct Cli {
 
     #[arg(short = 'A', long, env = "ATTACCA_AGENT", help = "Agent UUID")]
     agent: Option<String>,
+
+    #[arg(long, help = "Show debug info (URLs, responses)")]
+    debug: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -296,14 +299,18 @@ fn format_tool(tc: &ToolCall) -> String {
 
 const DEFAULT_API_URL: &str = "https://attacca.cc/api/v1";
 
-struct ApiClient { inner: Client, key: String, base_url: String }
+struct ApiClient { inner: Client, key: String, base_url: String, debug: bool }
 
 impl ApiClient {
-    fn from_env() -> Result<Self, String> {
+    fn from_env(debug: bool) -> Result<Self, String> {
         let key = std::env::var("ATTACCA_API_KEY").map_err(|_| "Set ATTACCA_API_KEY (or .env)\n  Get at https://attacca.cc/settings/api-keys".to_string())?;
         let base_url = std::env::var("ATTACCA_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
         let inner = Client::builder().user_agent("attacca-cli/0.1.0").build().map_err(|e| format!("reqwest: {e}"))?;
-        Ok(Self { inner, key, base_url })
+        Ok(Self { inner, key, base_url, debug })
+    }
+
+    fn log(&self, msg: &str) {
+        if self.debug { eprintln!("{} {}", "🔍".bright_black(), msg.bright_black()); }
     }
 
     fn bearer(&self) -> reqwest::header::HeaderMap {
@@ -319,41 +326,126 @@ impl ApiClient {
         format!("{}/{}", base, p.trim_start_matches('/'))
     }
 
-    async fn get_me(&self) -> Result<MeDto, String> { api_call(self.inner.get(self.url("/v1/me")).headers(self.bearer())).await }
-    async fn list_agents(&self) -> Result<Vec<AgentDto>, String> { api_call(self.inner.get(self.url("/v1/agents")).headers(self.bearer())).await }
-    async fn list_projects(&self) -> Result<Vec<ProjectDto>, String> { api_call(self.inner.get(self.url("/v1/projects")).headers(self.bearer())).await }
+    async fn get_me(&self) -> Result<MeDto, String> {
+        let url = self.url("/v1/me");
+        self.log(&format!("GET {url}"));
+        api_call(self.inner.get(&url).headers(self.bearer())).await
+    }
+    async fn list_agents(&self) -> Result<Vec<AgentDto>, String> {
+        let url = self.url("/v1/agents");
+        self.log(&format!("GET {url}"));
+        api_call(self.inner.get(&url).headers(self.bearer())).await
+    }
+    async fn list_projects(&self) -> Result<Vec<ProjectDto>, String> {
+        let url = self.url("/v1/projects");
+        self.log(&format!("GET {url}"));
+        api_call(self.inner.get(&url).headers(self.bearer())).await
+    }
     async fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<SessionDto>, String> {
-        let mut req = self.inner.get(self.url("/v1/sessions")).headers(self.bearer());
+        let url = self.url("/v1/sessions");
+        self.log(&format!("GET {url}"));
+        let mut req = self.inner.get(&url).headers(self.bearer());
         if let Some(pid) = project_id { req = req.query(&[("project_id", pid)]); }
         api_call(req).await
     }
 
     async fn create_session(&self, project_id: Option<&str>, agent_id: Option<&str>) -> Result<SessionDto, String> {
+        let url = self.url("/v1/sessions");
+        self.log(&format!("POST {url}"));
         let mut body = serde_json::json!({"title": "attacca-cli"});
         if let Some(pid) = project_id { body["project_id"] = serde_json::json!(pid); }
         if let Some(aid) = agent_id { body["agent_id"] = serde_json::json!(aid); }
-        api_call(self.inner.post(self.url("/v1/sessions")).headers(self.bearer()).json(&body)).await
+        api_call(self.inner.post(&url).headers(self.bearer()).json(&body)).await
     }
 
     async fn send_message(&self, session_id: &str, msg: &str) -> Result<(), String> {
+        let url = self.url(&format!("/v1/sessions/{session_id}/messages"));
+        self.log(&format!("POST {url} ({} bytes)", msg.len()));
         let body = serde_json::json!({"message": msg, "timezone": "Asia/Seoul"});
-        let resp = self.inner.post(self.url(&format!("/v1/sessions/{session_id}/messages"))).headers(self.bearer()).json(&body).send().await.map_err(|e| format!("request: {e}"))?;
+        let resp = self.inner.post(&url).headers(self.bearer()).json(&body).send().await.map_err(|e| format!("request: {e}"))?;
         let s = resp.status();
         if s.is_success() || s.as_u16() == 202 { Ok(()) }
         else { let b = resp.text().await.unwrap_or_default(); Err(format!("HTTP {s}\n{}", &b[..b.len().min(300)])) }
     }
 
     async fn get_session(&self, session_id: &str) -> Result<SessionDto, String> {
-        api_call(self.inner.get(self.url(&format!("/v1/sessions/{session_id}"))).headers(self.bearer())).await
+        let url = self.url(&format!("/v1/sessions/{session_id}"));
+        self.log(&format!("GET {url}"));
+        api_call(self.inner.get(&url).headers(self.bearer())).await
     }
 
     async fn get_messages_after(&self, session_id: &str, after: i64) -> Result<Vec<MessageDto>, String> {
-        api_call(self.inner.get(self.url(&format!("/v1/sessions/{session_id}/messages?after={after}"))).headers(self.bearer())).await
+        let url = self.url(&format!("/v1/sessions/{session_id}/messages?after={after}"));
+        self.log(&format!("GET {url}"));
+        api_call(self.inner.get(&url).headers(self.bearer())).await
             .map(|mut msgs: Vec<MessageDto>| { msgs.reverse(); msgs })
     }
 
     async fn wait_until_done(&self, session_id: &str) -> Result<(), String> {
-        loop { let s = self.get_session(session_id).await?; if !s.running { return Ok(()); } tokio::time::sleep(std::time::Duration::from_millis(500)).await; }
+        self.log(&format!("waiting for session {session_id}..."));
+        loop {
+            let s = self.get_session(session_id).await?;
+            if !s.running { self.log("session done"); return Ok(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    /// Diagnose: test all major API endpoints
+    async fn diagnose(&self) {
+        println!("\n{} Diagnostics:", "🔍".bright_cyan());
+        println!("  API URL: {}", self.base_url);
+
+        let tests: Vec<(&str, &str)> = vec![
+            ("GET /me", "/v1/me"),
+            ("GET /sessions", "/v1/sessions"),
+            ("GET /projects", "/v1/projects"),
+            ("GET /agents", "/v1/agents"),
+        ];
+
+        for (name, path) in &tests {
+            let url = self.url(path);
+            print!("  {} {:<20} ... ", name, "");
+            use std::io::Write; std::io::stdout().flush().ok();
+            let resp = self.inner.get(&url).headers(self.bearer()).send().await;
+            match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    let preview = if body.len() > 100 { format!("{}...", &body[..100]) } else { body };
+                    if status.is_success() {
+                        println!("{}", "✅".bright_green());
+                        if self.debug { println!("  └ {}", preview.bright_black()); }
+                    } else {
+                        println!("{} HTTP {}", "❌".bright_red(), status);
+                        println!("  └ {}", preview);
+                    }
+                }
+                Err(e) => println!("{} {e}", "💥".bright_red()),
+            }
+        }
+
+        // Try to create a test session
+        println!();
+        let url = self.url("/v1/sessions");
+        print!("  {} POST /sessions (create test) ... ", "🔧".bright_yellow());
+        use std::io::Write; std::io::stdout().flush().ok();
+        let resp = self.inner.post(&url).headers(self.bearer())
+            .json(&serde_json::json!({"title": "attacca-cli-diagnose"})).send().await;
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                if status.is_success() {
+                    let body: serde_json::Value = r.json().await.unwrap_or_default();
+                    let sid = body["id"].as_str().unwrap_or("?");
+                    println!("{} session_id={}", "✅".bright_green(), sid);
+                } else {
+                    let body = r.text().await.unwrap_or_default();
+                    println!("{} HTTP {}", "❌".bright_red(), status);
+                    println!("  └ {}", &body[..body.len().min(200)]);
+                }
+            }
+            Err(e) => println!("{} {e}", "💥".bright_red()),
+        }
     }
 
     async fn resolve_project(&self, project: &str) -> Result<String, String> {
@@ -416,6 +508,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show this help"),
     ("/new", "Create a new session"),
     ("/sessions", "Switch to a different session"),
+    ("/diagnose", "Test API connection"),
     ("/quit", "Exit the program"),
     ("/exit", "Exit the program"),
 ];
@@ -564,15 +657,17 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                 match trimmed.as_str() {
                     "/help" => {
                         println!("{} Commands:", "●".bright_yellow());
-                        println!("  /help     Show this");
-                        println!("  /new      New session");
-                        println!("  /sessions Switch session");
-                        println!("  /quit     Exit");
+                        println!("  /help      Show this");
+                        println!("  /new       New session");
+                        println!("  /sessions  Switch session");
+                        println!("  /diagnose  Test API connection");
+                        println!("  /quit      Exit");
                         println!();
                         println!("{} Flags:", "●".bright_yellow());
                         println!("  -P, --project   Project name/UUID");
                         println!("  -S, --session   Session UUID (resume)");
                         println!("  -A, --agent     Agent UUID");
+                        println!("  --debug         Show API URLs");
                         continue;
                     }
                     "/quit" | "/exit" => break,
@@ -589,6 +684,10 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                             Ok((sid, cur, ft)) => { session_id = sid; cursor = cur; first_turn = ft; }
                             Err(e) => { print_error(&format!("pick session: {e}")); }
                         }
+                        continue;
+                    }
+                    "/diagnose" => {
+                        client.diagnose().await;
                         continue;
                     }
                     _ => {}
@@ -706,7 +805,7 @@ async fn main() {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
 
-    let client = match ApiClient::from_env() {
+    let client = match ApiClient::from_env(cli.debug) {
         Ok(c) => c,
         Err(e) => { print_error(&e); std::process::exit(1); }
     };
