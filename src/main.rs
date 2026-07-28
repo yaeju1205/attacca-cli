@@ -14,40 +14,48 @@ use rustyline::{Context, Helper};
 use rustyline::{Editor, Result as RlResult};
 use std::collections::HashMap;
 
-const PROTOCOL: &str = r#"## attacca-cli bridge protocol
+const PROTOCOL: &str = r#"## attacca-cli — dual-computer bridge
 
-You are connected to the user's **local computer** through attacca-cli. To
-interact with it, output JSON tool calls inside ```attacca-tool blocks.
-You can output MULTIPLE tool calls in the same response -- they run in
-sequence, each getting its result sent back.
+You have access to **TWO computers simultaneously**:
+
+### 1. Your Attacca Cloud Computer (native)
+You are already running on Attacca's cloud computer. Use your normal tools:
+- file read/write/edit on the cloud
+- terminal commands on the cloud
+- browser, search, etc.
+
+### 2. User's Local Computer (via bridge)
+To interact with the **user's local machine**, output JSON tool calls inside
+```attacca-tool blocks. You can output MULTIPLE tool calls in one response.
 
 Example:
 ```attacca-tool
-{"tool": "read_file", "args": {"path": "/home/user/hello.txt"} }
+{"tool": "read_file", "args": {"path": "/home/user/projects/hello.txt"} }
 ```
 
-### Available tools
-
-| Tool | Args | Description |
-|------|------|-------------|
+| Tool | Args | What it does on the USER's machine |
+|------|------|------------------------------------|
 | read_file | path | Read a text file |
-| write_file | path, content | Write a new file or overwrite |
+| write_file | path, content | Write/overwrite a file |
 | edit_file | path, old_string, new_string | Find-and-replace in a file |
-| list_dir | path | List a directory |
-| run_command | command | Run ANY shell command (use for grep, find, cat, ls, mkdir, cp, mv, wc, diff, sort, head, tail, sed, awk, etc.) |
+| list_dir | path | List directory contents |
+| run_command | command | Run ANY shell command (grep, find, cat, ls, mkdir, cp, mv, sed, awk, etc.) |
 | create_dir | path | Create a directory |
-| file_exists | path | Check a file exists |
-| delete_file | path | Delete a file or empty dir |
-| read_files | paths[] | Batch read MULTIPLE files at once |
-| batch_read | paths[] | Alias for read_files |
+| file_exists | path | Check if a file exists |
+| delete_file | path | Delete a file or directory |
+| read_files | paths[] | Batch-read MULTIPLE files at once |
+
+### Your default workflow
+1. **Read from the user's machine** (run_command with cat/grep/find, or read_file/read_files) to understand the codebase
+2. **Edit on the user's machine** (write_file, edit_file, run_command with sed/mv/cp)
+3. **Use your cloud computer** for anything that needs heavy computation, web search, or analysis
+4. When you need to tell the user something, just write it as normal text
 
 ### Rules
-1. Plan ahead: read ALL needed files first before writing anything.
-2. Use run_command with grep, find, glob patterns for searching.
-3. Use read_files to batch-read many files at once.
-4. After getting results, continue your reasoning directly.
-5. Do NOT invent file contents -- always read them first.
-6. Do NOT explain what you would do -- actually do it with tools."#;
+- Read files before writing them — never invent contents.
+- Use run_command for: grep, find, cat, head, tail, wc, diff, sort, sed, awk, git, cargo, npm, ls, mkdir, cp, mv, rm, pwd, which
+- Use read_files to batch-read many files at once.
+- After executing tools, continue your reasoning."#;
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -599,7 +607,8 @@ async fn pick_session(client: &ApiClient, project_id: Option<String>, agent_id: 
         }
         _ => {
             let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
-            println!("{}  Created session {}", "  ✚".bright_green(), s.id);
+            let title = if s.title.is_empty() { "(untitled)" } else { &s.title };
+            println!("{}  Created session {} ({})", "  ✚".bright_green(), s.id, title.bold());
             Ok((s.id, 0, true))
         }
     }
@@ -674,7 +683,8 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                     "/new" => {
                         match client.create_session(project_id.as_deref(), agent_id.as_deref()).await {
                             Ok(s) => { session_id = s.id; cursor = 0; first_turn = true;
-                                println!("{} New session: {}", "💬".bright_black(), session_id); }
+                                let title = if s.title.is_empty() { "(untitled)" } else { &s.title };
+                                println!("{} New session: {} ({})", "💬".bright_black(), session_id, title.bold()); }
                             Err(e) => { print_error(&format!("create session: {e}")); }
                         }
                         continue;
