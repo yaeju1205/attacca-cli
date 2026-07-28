@@ -4,7 +4,14 @@ use colored::*;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
-use rustyline::DefaultEditor;
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::{self, Validator};
+use rustyline::{Context, Helper};
+use rustyline::history::DefaultHistory;
+use rustyline::{Editor, Result as RlResult};
+use std::borrow::Cow::{self, Borrowed, Owned};
 use std::collections::HashMap;
 
 const PROTOCOL: &str = r#"## attacca-cli bridge protocol
@@ -399,6 +406,66 @@ fn ask_approve(danger: bool) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Slash command autocomplete helper
+// ---------------------------------------------------------------------------
+
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "Show this help"),
+    ("/new", "Create a new session"),
+    ("/sessions", "Switch to a different session"),
+    ("/quit", "Exit the program"),
+    ("/exit", "Exit the program"),
+];
+
+struct SlashHelper;
+
+impl Completer for SlashHelper {
+    type Candidate = Pair;
+
+    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> RlResult<(usize, Vec<Pair>)> {
+        if !line.starts_with('/') {
+            return Ok((pos, vec![]));
+        }
+        let candidates: Vec<Pair> = SLASH_COMMANDS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(line.trim_start()))
+            .map(|(cmd, desc)| Pair {
+                display: format!("{}  — {}", cmd.bright_cyan(), desc.bright_black()),
+                replacement: format!("{} ", cmd),
+            })
+            .collect();
+        Ok((0, candidates))
+    }
+}
+
+impl Hinter for SlashHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        if !line.starts_with('/') { return None; }
+        SLASH_COMMANDS.iter().find(|(cmd, _)| cmd.starts_with(line.trim_start()) && cmd.len() > line.trim_start().len())
+            .map(|(cmd, _)| cmd[pos..].to_string())
+    }
+}
+
+impl Highlighter for SlashHelper {
+    fn highlight_hint<'a>(&self, hint: &'a str) -> Cow<'a, str> {
+        Owned(hint.bright_black().to_string())
+    }
+    fn highlight<'a>(&self, line: &'a str, _pos: usize) -> Cow<'a, str> {
+        if line.starts_with('/') { Owned(line.bright_cyan().to_string()) } else { Borrowed(line) }
+    }
+}
+
+impl Validator for SlashHelper {
+    fn validate(&self, _ctx: &mut validate::ValidationContext) -> RlResult<validate::ValidationResult> {
+        Ok(validate::ValidationResult::Valid(None))
+    }
+}
+
+impl Helper for SlashHelper {}
+
+// ---------------------------------------------------------------------------
 // Interactive session
 // ---------------------------------------------------------------------------
 
@@ -482,7 +549,9 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
         }
     };
 
-    let mut rl = DefaultEditor::new().map_err(|e| format!("rustyline: {e}"))?;
+    let mut rl: Editor<SlashHelper, DefaultHistory> = Editor::new()
+        .map_err(|e| format!("rustyline: {e}"))?;
+    rl.set_helper(Some(SlashHelper));
     let _ = rl.load_history("attacca_history.txt");
 
     loop {
