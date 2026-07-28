@@ -23,21 +23,20 @@ impl Api {
         Self { inner, key, base }
     }
 
-    /// Build URL from path.
-    ///
-    /// OpenAPI paths start with `/v1/` (e.g. `/v1/me`, `/v1/sessions`).
-    /// If the user's base URL already includes `/v1` (e.g. `https://attacca.cc/api/v1`),
-    /// we strip the `/v1` prefix from the path to avoid doubling:
-    ///   `https://attacca.cc/api/v1` + `/v1/me` → `https://attacca.cc/api/v1/me`
-    pub fn url(&self, path: &str) -> String {
-        let b = self.base.trim_end_matches('/');
+    /// Build URL from base + path, avoiding double /v1/.
+    fn build_url(base: &str, path: &str) -> String {
+        let b = base.trim_end_matches('/');
         let p = path.trim_start_matches('/');
-        // If base ends with /v1 and path starts with v1/, remove the v1/ from path
         if b.ends_with("/v1") && p.starts_with("v1/") {
             format!("{b}/{}", &p[3..])
         } else {
             format!("{b}/{p}")
         }
+    }
+
+    /// Build URL from path.
+    pub fn url(&self, path: &str) -> String {
+        Self::build_url(&self.base, path)
     }
 
     fn headers(&self) -> reqwest::header::HeaderMap {
@@ -90,7 +89,7 @@ impl Api {
 
         let mut out = Vec::new();
         for &(base, path) in &combos {
-            let url = format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'));
+            let url = Self::build_url(base, path);
             let resp = self.inner.get(&url).headers(self.headers()).send().await;
             let (status, body, ok) = match resp {
                 Ok(r) => {
@@ -140,7 +139,6 @@ mod tests {
 
     #[test]
     fn test_url_with_v1_suffix() {
-        // When base ends with /v1, strip /v1/ from path to avoid /v1/v1/
         let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/api/v1".into() };
         assert_eq!(api.url("/v1/me"), "https://attacca.cc/api/v1/me");
         assert_eq!(api.url("/v1/sessions"), "https://attacca.cc/api/v1/sessions");
@@ -157,5 +155,20 @@ mod tests {
     fn test_url_trailing_slash() {
         let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/".into() };
         assert_eq!(api.url("/v1/me"), "https://attacca.cc/v1/me");
+    }
+
+    #[test]
+    fn test_build_url_strips_double_v1() {
+        assert_eq!(Api::build_url("https://attacca.cc/api/v1", "/v1/me"), "https://attacca.cc/api/v1/me");
+    }
+
+    #[test]
+    fn test_build_url_no_strip_when_no_v1() {
+        assert_eq!(Api::build_url("https://attacca.cc", "/v1/me"), "https://attacca.cc/v1/me");
+    }
+
+    #[test]
+    fn test_build_url_preserves_me() {
+        assert_eq!(Api::build_url("https://attacca.cc/v1", "/me"), "https://attacca.cc/v1/me");
     }
 }
