@@ -8,7 +8,7 @@ use rustyline::DefaultEditor;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
-// Protocol — tells the agent how to request tool calls
+// Protocol
 // ---------------------------------------------------------------------------
 
 const PROTOCOL: &str = r#"## attacca-cli bridge protocol
@@ -90,7 +90,28 @@ struct MeDto {
     scopes: Vec<String>,
 }
 
-/// Wrapper that parses JSON or shows raw body.
+#[derive(Deserialize, Default, Debug)]
+struct AgentDto {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct ProjectDto {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    is_default: bool,
+}
+
+// ---------------------------------------------------------------------------
+// API helpers
+// ---------------------------------------------------------------------------
+
 async fn json_or_body<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, String> {
@@ -104,14 +125,11 @@ async fn json_or_body<T: serde::de::DeserializeOwned>(
             } else {
                 body.clone()
             };
-            Err(format!(
-                "Status: {status}\nJSON decode: {e}\nRaw: {preview}"
-            ))
+            Err(format!("Status: {status}\nJSON decode: {e}\nRaw: {preview}"))
         }
     }
 }
 
-/// Call an API endpoint; on failure shows the raw status + body.
 async fn api_call<T: serde::de::DeserializeOwned>(
     req: reqwest::RequestBuilder,
 ) -> Result<T, String> {
@@ -135,6 +153,14 @@ async fn api_call<T: serde::de::DeserializeOwned>(
 struct Cli {
     /// Message to send (one-shot mode)
     message: Option<String>,
+
+    /// Project UUID or name to attach this chat to
+    #[arg(short = 'P', long, env = "ATTACCA_PROJECT")]
+    project: Option<String>,
+
+    /// Agent UUID to run this chat on
+    #[arg(short = 'A', long, env = "ATTACCA_AGENT")]
+    agent: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +173,6 @@ struct ToolCall {
     args: HashMap<String, String>,
 }
 
-/// Parse ```attacca-tool blocks from agent text, returning (clean_text, tools).
 fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
     let mut tools = Vec::new();
     let mut clean = text.to_string();
@@ -189,7 +214,7 @@ fn parse_single_tool(json: &str) -> Result<ToolCall, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool execution (local)
+// Tool execution
 // ---------------------------------------------------------------------------
 
 fn execute_tool(tc: &ToolCall) -> String {
@@ -311,7 +336,6 @@ fn execute_tool(tc: &ToolCall) -> String {
     }
 }
 
-/// Returns true for dangerous commands that should default to "no"
 fn is_dangerous(tc: &ToolCall) -> bool {
     if tc.name == "run_command" {
         let cmd = tc.args.get("command").map(|s| s.as_str()).unwrap_or("");
@@ -360,23 +384,15 @@ impl ApiClient {
 
     fn bearer_header(&self) -> reqwest::header::HeaderMap {
         let mut h = reqwest::header::HeaderMap::new();
-        h.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.key).parse().unwrap(),
-        );
-        // Force JSON response — the main attacca.cc returns SPA HTML without it
-        h.insert(
-            reqwest::header::ACCEPT,
-            "application/json".parse().unwrap(),
-        );
+        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.key).parse().unwrap());
+        h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
         h
     }
 
     fn url(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
-        // Strip /v1/ prefix if the base already includes /api/v1
         let p = if base.contains("/api/v1") && path.starts_with("/v1/") {
-            &path[3..] // chop "/v1" → "/me", "/sessions/..."
+            &path[3..]
         } else {
             path
         };
@@ -388,11 +404,26 @@ impl ApiClient {
         api_call(self.inner.get(self.url("/v1/me")).headers(self.bearer_header())).await
     }
 
-    async fn create_session(&self) -> Result<SessionDto, String> {
+    async fn list_agents(&self) -> Result<Vec<AgentDto>, String> {
+        api_call(self.inner.get(self.url("/v1/agents")).headers(self.bearer_header())).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<ProjectDto>, String> {
+        api_call(self.inner.get(self.url("/v1/projects")).headers(self.bearer_header())).await
+    }
+
+    async fn create_session(&self, project_id: Option<&str>, agent_id: Option<&str>) -> Result<SessionDto, String> {
+        let mut body = serde_json::json!({"title": "attacca-cli"});
+        if let Some(pid) = project_id {
+            body["project_id"] = serde_json::json!(pid);
+        }
+        if let Some(aid) = agent_id {
+            body["agent_id"] = serde_json::json!(aid);
+        }
         api_call(
             self.inner.post(self.url("/v1/sessions"))
                 .headers(self.bearer_header())
-                .json(&serde_json::json!({"title": "attacca-cli"})),
+                .json(&body),
         ).await
     }
 
@@ -428,6 +459,22 @@ impl ApiClient {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
+
+    /// Resolve --project flag: try UUID first, then name match
+    async fn resolve_project(&self, project: &str) -> Result<String, String> {
+        // If it looks like a UUID, use it directly
+        if project.len() == 36 && project.contains('-') {
+            return Ok(project.to_string());
+        }
+        // Otherwise match by name
+        let projects = self.list_projects().await?;
+        for p in &projects {
+            if p.name == project {
+                return Ok(p.id.clone());
+            }
+        }
+        Err(format!("Project '{project}' not found. Available:\n  {}", projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("\n  ")))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -438,9 +485,15 @@ fn print_error(msg: &str) {
     eprintln!("✖ {}", msg.bright_red());
 }
 
-fn print_banner(me: &MeDto) {
+fn print_banner(me: &MeDto, project_name: Option<&str>, agent_name: Option<&str>) {
     println!();
     println!("{}  Attacca CLI -- {} ({})", "◆".bright_cyan(), me.display_name.bold(), me.email);
+    if let Some(pn) = project_name {
+        println!("{}  Project: {}", "📁".bright_cyan(), pn.bold());
+    }
+    if let Some(an) = agent_name {
+        println!("{}  Agent: {}", "🤖".bright_cyan(), an.bold());
+    }
     println!("{}  Bridge mode: agent can access your local computer via tools", "🔗".bright_cyan());
     println!("{}  Type /help for commands", "◆".bright_cyan());
     println!();
@@ -476,16 +529,32 @@ fn ask_approve(danger: bool) -> bool {
 // Interactive mode
 // ---------------------------------------------------------------------------
 
-async fn run_interactive(client: &ApiClient) -> Result<(), String> {
+async fn run_interactive(client: &ApiClient, project_id: Option<String>, agent_id: Option<String>) -> Result<(), String> {
     let me = client.get_me().await?;
-    print_banner(&me);
+
+    // Resolve names for display
+    let project_name = if project_id.is_some() {
+        client.list_projects().await.ok().and_then(|ps| {
+            let pid = project_id.as_ref().unwrap();
+            ps.iter().find(|p| p.id == *pid).map(|p| p.name.clone())
+        })
+    } else { None };
+
+    let agent_name = if agent_id.is_some() {
+        client.list_agents().await.ok().and_then(|as_| {
+            let aid = agent_id.as_ref().unwrap();
+            as_.iter().find(|a| a.id == *aid).map(|a| a.name.clone())
+        })
+    } else { None };
+
+    print_banner(&me, project_name.as_deref(), agent_name.as_deref());
 
     let mut session_id;
     {
-        let s = client.create_session().await?;
+        let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
         session_id = s.id;
     }
-    println!("{} Session: {}", "📁".bright_black(), session_id);
+    println!("{} Session: {}", "💬".bright_black(), session_id);
     println!("{} CWD: {}", "📁".bright_black(),
         std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default());
     println!();
@@ -513,15 +582,20 @@ async fn run_interactive(client: &ApiClient) -> Result<(), String> {
                         println!("  /quit         Exit");
                         println!("  /new          Start a fresh session");
                         println!("  anything      Send to agent");
+                        println!();
+                        println!("{} Flags:", "●".bright_yellow());
+                        println!("  --project,-P <name|uuid>   Attach chat to a project");
+                        println!("  --agent,-A  <uuid>         Use a specific agent");
+                        println!("  ATTACCA_PROJECT env var     Default project");
                         continue;
                     }
                     "/quit" | "/exit" => break,
                     "/new" => {
-                        let s = client.create_session().await?;
+                        let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
                         session_id = s.id;
                         cursor = 0;
                         first_turn = true;
-                        println!("{} New session: {}", "📁".bright_black(), session_id);
+                        println!("{} New session: {}", "💬".bright_black(), session_id);
                         continue;
                     }
                     _ => {}
@@ -530,12 +604,9 @@ async fn run_interactive(client: &ApiClient) -> Result<(), String> {
                 let full_msg = if first_turn {
                     first_turn = false;
                     format!("{}\n\n---\n{}", PROTOCOL, trimmed)
-                } else {
-                    trimmed
-                };
+                } else { trimmed };
                 client.send_message(&session_id, &full_msg).await?;
 
-                // Inner tool loop: keep processing tools until agent is idle with no tools
                 loop {
                     client.wait_until_done(&session_id).await?;
                     let msgs = client.get_messages_after(&session_id, cursor).await?;
@@ -572,9 +643,7 @@ async fn run_interactive(client: &ApiClient) -> Result<(), String> {
                                 let combined = results.join("\n\n");
                                 let result_msg = if combined.len() > 100_000 {
                                     format!("{}...(truncated)", &combined[..100_000])
-                                } else {
-                                    combined
-                                };
+                                } else { combined };
                                 client.send_message(&session_id, &result_msg).await?;
                             }
                         }
@@ -605,8 +674,8 @@ async fn run_interactive(client: &ApiClient) -> Result<(), String> {
 // One-shot mode
 // ---------------------------------------------------------------------------
 
-async fn run_one_shot(client: &ApiClient, message: &str) -> Result<(), String> {
-    let session = client.create_session().await?;
+async fn run_one_shot(client: &ApiClient, message: &str, project_id: Option<String>, agent_id: Option<String>) -> Result<(), String> {
+    let session = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
     let full_msg = format!("{}\n\n---\n{}", PROTOCOL, message);
     client.send_message(&session.id, &full_msg).await?;
 
@@ -630,7 +699,6 @@ async fn run_one_shot(client: &ApiClient, message: &str) -> Result<(), String> {
                     for tc in &tools {
                         let danger = is_dangerous(tc);
                         print_tool_invoke(tc, danger);
-
                         if danger {
                             if !ask_approve(true) {
                                 println!("  └ {} rejected", "✖".bright_red());
@@ -638,7 +706,6 @@ async fn run_one_shot(client: &ApiClient, message: &str) -> Result<(), String> {
                                 continue;
                             }
                         }
-
                         println!("  └ {}", "✔ running...".bright_green());
                         let result = execute_tool(tc);
                         results.push(format!("[Tool \"{}\" result]:\n{}", tc.name, result));
@@ -648,22 +715,11 @@ async fn run_one_shot(client: &ApiClient, message: &str) -> Result<(), String> {
                         let combined = results.join("\n\n");
                         let result_msg = if combined.len() > 100_000 {
                             format!("{}...(truncated)", &combined[..100_000])
-                        } else {
-                            combined
-                        };
+                        } else { combined };
                         client.send_message(&session.id, &result_msg).await?;
                     }
                 }
             }
-
-            // fetch final thoughts
-            if let MessageRole::Assistant = m.role {
-                let (text, tools) = parse_tool_calls(&m.text);
-                if tools.is_empty() && !text.is_empty() && sent_results {
-                    // already printed above
-                }
-            }
-
             if m.cursor > cursor { cursor = m.cursor; }
         }
 
@@ -688,9 +744,18 @@ async fn main() {
         Err(e) => { print_error(&e); std::process::exit(1); }
     };
 
+    // Resolve project if given
+    let project_id = match &cli.project {
+        Some(p) => match client.resolve_project(p).await {
+            Ok(id) => Some(id),
+            Err(e) => { print_error(&e); std::process::exit(1); }
+        },
+        None => None,
+    };
+
     let result = match cli.message {
-        Some(msg) => run_one_shot(&client, &msg).await,
-        None => run_interactive(&client).await,
+        Some(msg) => run_one_shot(&client, &msg, project_id, cli.agent).await,
+        None => run_interactive(&client, project_id, cli.agent).await,
     };
 
     if let Err(e) = result {
