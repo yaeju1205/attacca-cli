@@ -5,11 +5,12 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use rustyline::completion::{Completer, Pair};
+use rustyline::config::{CompletionType, Config};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::{self, Validator};
-use rustyline::{Context, Helper};
 use rustyline::history::DefaultHistory;
+use rustyline::{Context, Helper};
 use rustyline::{Editor, Result as RlResult};
 use std::borrow::Cow::{self, Borrowed, Owned};
 use std::collections::HashMap;
@@ -423,18 +424,21 @@ impl Completer for SlashHelper {
     type Candidate = Pair;
 
     fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> RlResult<(usize, Vec<Pair>)> {
-        if !line.starts_with('/') {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('/') {
             return Ok((pos, vec![]));
         }
         let candidates: Vec<Pair> = SLASH_COMMANDS
             .iter()
-            .filter(|(cmd, _)| cmd.starts_with(line.trim_start()))
+            .filter(|(cmd, _)| cmd.starts_with(trimmed))
             .map(|(cmd, desc)| Pair {
                 display: format!("{}  — {}", cmd.bright_cyan(), desc.bright_black()),
                 replacement: format!("{} ", cmd),
             })
             .collect();
-        Ok((0, candidates))
+        // Start from the first '/'
+        let start_pos = line.find('/').unwrap_or(pos);
+        Ok((start_pos, candidates))
     }
 }
 
@@ -549,7 +553,10 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
         }
     };
 
-    let mut rl: Editor<SlashHelper, DefaultHistory> = Editor::new()
+    let config = Config::builder()
+        .completion_type(CompletionType::List)
+        .build();
+    let mut rl: Editor<SlashHelper, DefaultHistory> = Editor::with_config(config)
         .map_err(|e| format!("rustyline: {e}"))?;
     rl.set_helper(Some(SlashHelper));
     let _ = rl.load_history("attacca_history.txt");
