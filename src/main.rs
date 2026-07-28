@@ -235,7 +235,7 @@ impl App {
         }
         if lines.is_empty() {
             lines.push(Line::from(vec![Span::styled(
-                " enter:send · tab:side · y/n:tool · /test",
+                " enter:send · tab:side · y/n:tool · q:quit",
                 Style::new().fg(GRAY),
             )]));
         }
@@ -332,7 +332,7 @@ impl App {
             self.chat("sys", "no API key — set ATTACCA_API_KEY");
             return;
         }
-        match self.api.get("/v1/sessions").await {
+        match self.api.get("sessions").await {
             Ok(body) => {
                 if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&body) {
                     self.sessions = arr
@@ -419,17 +419,7 @@ impl App {
             match raw.as_str() {
                 "/q" | "/quit" | "/exit" => std::process::exit(0),
                 "/h" | "/help" => {
-                    self.chat("sys", "enter:send tab:side y/n:tool q:quit /test:probe api");
-                    return;
-                }
-                "/test" => {
-                    self.chat("sys", "probing API endpoints...");
-                    let results = self.api.diagnose().await;
-                    for r in &results {
-                        let icon = if r.ok { "✓" } else { " " };
-                        let note = if r.ok { "  ← OK" } else { "" };
-                        self.chat("sys", &format!("{icon} {url} → HTTP {s}{note}", url = r.url, s = r.status));
-                    }
+                    self.chat("sys", "enter:send tab:side y/n:tool q:quit");
                     return;
                 }
                 "/sessions" => {
@@ -632,7 +622,7 @@ async fn main() {
     term.clear().ok();
 
     let mut app = App::new(api);
-    app.chat("sys", "enter: send · tab: side panel · y/n: approve tool · /test: probe API");
+    app.chat("sys", "enter: send · tab: side panel · y/n: approve tool · q: quit");
 
     // main loop
     loop {
