@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use clap::Parser;
 use colored::*;
 use reqwest::Client;
@@ -347,7 +348,7 @@ struct ApiClient {
 impl ApiClient {
     fn from_env() -> Result<Self, String> {
         let key = std::env::var("ATTACCA_API_KEY").map_err(|_| {
-            "Set ATTACCA_API_KEY (get one at attacca.cc > Settings > API keys)".to_string()
+            "Set ATTACCA_API_KEY (or add it to .env)\n  Get one at https://attacca.cc/settings/api-keys".to_string()
         })?;
         let base_url = std::env::var("ATTACCA_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
         let inner = Client::builder()
@@ -679,6 +680,7 @@ async fn run_one_shot(client: &ApiClient, message: &str) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
     let cli = Cli::parse();
 
     let client = match ApiClient::from_env() {
