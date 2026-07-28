@@ -451,7 +451,7 @@ async fn pick_session(client: &ApiClient, project_id: Option<String>, agent_id: 
 }
 
 async fn run_interactive(client: &ApiClient, project_id: Option<String>, session_id: Option<String>, agent_id: Option<String>) -> Result<(), String> {
-    let me = client.get_me().await?;
+    let me = client.get_me().await.unwrap_or_default();
     let projects = client.list_projects().await.ok().unwrap_or_default();
     let agents = client.list_agents().await.ok().unwrap_or_default();
 
@@ -460,7 +460,11 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
 
     // Banner
     println!();
-    println!("{}  Attacca CLI — {} ({})", "◆".bright_cyan(), me.display_name.bold(), me.email);
+    if me.email.is_empty() {
+        println!("{}  Attacca CLI (offline — check API key)", "◆".bright_cyan());
+    } else {
+        println!("{}  Attacca CLI — {} ({})", "◆".bright_cyan(), me.display_name.bold(), me.email);
+    }
     if let Some(pn) = project_name { println!("{}  Project: {}", "📁".bright_cyan(), pn.bold()); }
     if let Some(an) = agent_name { println!("{}  Agent: {}", "🤖".bright_cyan(), an.bold()); }
     println!("{}  Bridge mode: agent can access your local computer via tools", "🔗".bright_cyan());
@@ -472,7 +476,10 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
         println!("{} Resuming session {}", "↻".bright_black(), sid);
         (sid, cur, false)
     } else {
-        pick_session(client, project_id.clone(), agent_id.clone()).await?
+        match pick_session(client, project_id.clone(), agent_id.clone()).await {
+            Ok(ok) => ok,
+            Err(e) => { print_error(&format!("session: {e}")); return Ok(()); }
+        }
     };
 
     let mut rl = DefaultEditor::new().map_err(|e| format!("rustyline: {e}"))?;
@@ -503,25 +510,37 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                     }
                     "/quit" | "/exit" => break,
                     "/new" => {
-                        let s = client.create_session(project_id.as_deref(), agent_id.as_deref()).await?;
-                        session_id = s.id; cursor = 0; first_turn = true;
-                        println!("{} New session: {}", "💬".bright_black(), session_id);
+                        match client.create_session(project_id.as_deref(), agent_id.as_deref()).await {
+                            Ok(s) => { session_id = s.id; cursor = 0; first_turn = true;
+                                println!("{} New session: {}", "💬".bright_black(), session_id); }
+                            Err(e) => { print_error(&format!("create session: {e}")); }
+                        }
                         continue;
                     }
                     "/sessions" => {
-                        let (sid, cur, ft) = pick_session(client, project_id.clone(), agent_id.clone()).await?;
-                        session_id = sid; cursor = cur; first_turn = ft;
+                        match pick_session(client, project_id.clone(), agent_id.clone()).await {
+                            Ok((sid, cur, ft)) => { session_id = sid; cursor = cur; first_turn = ft; }
+                            Err(e) => { print_error(&format!("pick session: {e}")); }
+                        }
                         continue;
                     }
                     _ => {}
                 }
 
                 let full_msg = if first_turn { first_turn = false; format!("{}\n\n---\n{}", PROTOCOL, trimmed) } else { trimmed };
-                client.send_message(&session_id, &full_msg).await?;
+                if let Err(e) = client.send_message(&session_id, &full_msg).await {
+                    print_error(&format!("send: {e}"));
+                    continue;
+                }
 
-                loop {
-                    client.wait_until_done(&session_id).await?;
-                    let msgs = client.get_messages_after(&session_id, cursor).await?;
+                'tool_loop: loop {
+                    if let Err(e) = client.wait_until_done(&session_id).await {
+                        print_error(&e); break;
+                    }
+                    let msgs = match client.get_messages_after(&session_id, cursor).await {
+                        Ok(m) => m,
+                        Err(e) => { print_error(&e); break; }
+                    };
                     if msgs.is_empty() { break; }
                     let mut sent_results = false;
 
@@ -545,7 +564,10 @@ async fn run_interactive(client: &ApiClient, project_id: Option<String>, session
                                 sent_results = true;
                                 let combined = results.join("\n\n");
                                 let msg = if combined.len() > 100_000 { format!("{}...(truncated)", &combined[..100_000]) } else { combined };
-                                client.send_message(&session_id, &msg).await?;
+                                if let Err(e) = client.send_message(&session_id, &msg).await {
+                                    print_error(&format!("send result: {e}"));
+                                    break 'tool_loop;
+                                }
                             }
                         }
                         if m.cursor > cursor { cursor = m.cursor; }
