@@ -79,6 +79,40 @@ impl Api {
             Err((s, b)) => format!("✖ HTTP {s}: {}", b.chars().take(60).collect::<String>()),
         }
     }
+
+    /// Returns rich whoami info: name, email, credits, plan, etc.
+    pub async fn whoami_detailed(&self) -> String {
+        match self.get("me").await {
+            Ok(body) => {
+                if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                    let name = v["display_name"].as_str().unwrap_or("?");
+                    let email = v["email"].as_str().unwrap_or("");
+                    let plan = v["plan"].as_str().unwrap_or("");
+                    let credits = v["credits"].as_str().unwrap_or("");
+                    format!("{name}|{email}|{plan}|{credits}")
+                } else {
+                    "?".to_string()
+                }
+            }
+            Err((s, b)) => format!("err: HTTP {s}: {}", b.chars().take(60).collect::<String>()),
+        }
+    }
+
+    /// Get session details (context tokens, model, etc.)
+    pub async fn get_session_info(&self, sid: &str) -> String {
+        match self.get(&format!("/v1/sessions/{sid}")).await {
+            Ok(body) => body,
+            Err(_) => String::new(),
+        }
+    }
+
+    /// Get session usage info as raw Value (credits, tokens, etc.)
+    pub async fn get_session_usage(&self, sid: &str) -> Value {
+        match self.get(&format!("/v1/sessions/{sid}")).await {
+            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+            Err(_) => Value::Null,
+        }
+    }
 }
 
 #[cfg(test)]

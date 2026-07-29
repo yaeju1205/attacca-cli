@@ -30,6 +30,7 @@ pub enum SidebarItem {
 enum BgEvent {
     NewMsgs { msgs: Vec<Msg>, new_cur: i64 },
     SessionCreated(String),
+    Usage(serde_json::Value),
     Done,
 }
 
@@ -38,6 +39,7 @@ enum Action {
     Open(String),
     Create,
     Login(String),
+    ShowInfo,
 }
 
 pub struct App {
@@ -59,7 +61,17 @@ pub struct App {
     pub focus: Focus,
     pub autocomplete_suggestions: Vec<String>,
     pub autocomplete_idx: Option<usize>,
-    busy_count: u32, // 0=ready, >0=waiting. NEVER gets stuck.
+    busy_count: u32,
+    pub user_name: String,
+    pub user_plan: String,
+    pub user_credits: String,
+    pub current_project_name: String,
+    pub usage_credits_used: String,
+    pub usage_context_tokens: String,
+    pub usage_input_tokens: String,
+    pub usage_output_tokens: String,
+    pub usage_total_tokens: String,
+    pub usage_model: String,
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
@@ -85,6 +97,16 @@ impl App {
             focus: Focus::Chat,
             autocomplete_suggestions: vec![],
             autocomplete_idx: None,
+            user_name: String::new(),
+            user_plan: String::new(),
+            user_credits: String::new(),
+            current_project_name: String::new(),
+            usage_credits_used: String::new(),
+            usage_context_tokens: String::new(),
+            usage_input_tokens: String::new(),
+            usage_output_tokens: String::new(),
+            usage_total_tokens: String::new(),
+            usage_model: String::new(),
             bg_tx: tx, bg_rx: rx, actions: vec![],
         }
     }
@@ -107,6 +129,7 @@ impl App {
         term.clear().ok();
         self.load_sessions().await;
         self.load_projects().await;
+        self.load_user_info().await;
         self.add("sys", "── attacca ── enter:send  tab:autocomplete  y/n:tool  /help ──");
 
         loop {
@@ -140,6 +163,22 @@ impl App {
                             self.sid = Some(sid);
                         }
                     }
+                    BgEvent::Usage(v) => {
+                        self.usage_model = field_val(&v["model"]);
+                        self.usage_credits_used = field_val(&v["credits_used"]);
+                        self.usage_context_tokens = field_val(&v["context_tokens"]);
+                        self.usage_input_tokens = field_val(&v["input_tokens"]);
+                        self.usage_output_tokens = field_val(&v["output_tokens"]);
+                        self.usage_total_tokens = field_val(&v["total_tokens"]);
+
+                        // also update current project from session data
+                        if let Some(pid) = v["project_id"].as_str().filter(|s| !s.is_empty()) {
+                            let name = self.project_names.get(pid)
+                                .cloned()
+                                .unwrap_or_else(|| format!("📁 {}", short(pid)));
+                            self.current_project_name = name;
+                        }
+                    }
                 }
             }
 
@@ -152,6 +191,7 @@ impl App {
                     Action::Open(sid) => self.open_async(&sid).await,
                     Action::Create => self.create_async().await,
                     Action::Login(key) => self.login_async(key).await,
+                    Action::ShowInfo => self.show_info_async().await,
                 }
             }
 
@@ -414,6 +454,9 @@ impl App {
                             self.add("sys", "  /help       Show this help");
                             self.add("sys", "  /new        Create a new session");
                             self.add("sys", "  /login KEY  Set your API key");
+                            self.add("sys", "  /credits    Show account/session info");
+                            self.add("sys", "  /me         Same as /credits");
+                            self.add("sys", "  /usage      Show session usage details");
                             self.add("sys", "  /sessions   Toggle sidebar focus");
                             self.add("sys", "");
                             self.add("sys", "── Keys ─────────────────────────────");
@@ -431,6 +474,10 @@ impl App {
                             } else {
                                 self.add("sys", "usage: /login <your_api_key>");
                             }
+                            return true;
+                        }
+                        "/credits" | "/me" | "/usage" => {
+                            self.actions.push(Action::ShowInfo);
                             return true;
                         }
                         "/new" | "/n" => { self.actions.push(Action::Create); return true; }
@@ -462,7 +509,7 @@ impl App {
         self.autocomplete_idx = None;
         let trimmed = self.input.trim();
         if trimmed.starts_with('/') && !trimmed.is_empty() && trimmed.len() > 1 {
-            let cmds = ["/exit", "/help", "/sessions", "/new", "/login"];
+            let cmds = ["/exit", "/help", "/sessions", "/new", "/login", "/credits", "/me", "/usage"];
             for cmd in &cmds {
                 if cmd.starts_with(trimmed) {
                     self.autocomplete_suggestions.push(cmd.to_string());
@@ -532,6 +579,16 @@ impl App {
         self.scroll = 0;
         self.at_end = true;
         self.add("sys", &format!("loading {}", short(sid)));
+
+        // set project name from sessions list
+        self.current_project_name = self.sessions.iter()
+            .find(|(_, _, id)| id == sid)
+            .and_then(|(pid, _, _)| {
+                if pid.is_empty() { None }
+                else { Some(self.project_names.get(pid).cloned().unwrap_or_else(|| format!("📁 {}", short(pid)))) }
+            })
+            .unwrap_or_default();
+
         self.rebuild_sidebar();
 
         let api = self.api.clone();
@@ -557,6 +614,11 @@ impl App {
             }
             if !new_msgs.is_empty() {
                 let _ = tx.send(BgEvent::NewMsgs { msgs: new_msgs, new_cur });
+            }
+            // load session usage info
+            let v = api.get_session_usage(&s).await;
+            if !v.is_null() {
+                let _ = tx.send(BgEvent::Usage(v));
             }
             let _ = tx.send(BgEvent::Done);
         });
@@ -812,4 +874,92 @@ impl App {
         }
         self.rebuild_sidebar();
     }
+
+    pub async fn load_user_info(&mut self) {
+        if self.api.key.is_empty() { return; }
+        let info = self.api.whoami_detailed().await;
+        // format: name|email|plan|credits
+        let parts: Vec<&str> = info.split('|').collect();
+        if parts.len() >= 4 {
+            self.user_name = parts[0].to_string();
+            self.user_plan = parts[2].to_string();
+            self.user_credits = parts[3].to_string();
+        }
+    }
+
+    pub async fn load_session_usage_async(&mut self) {
+        let Some(ref sid) = self.sid.clone() else { return };
+        if self.api.key.is_empty() { return; }
+        let api = self.api.clone();
+        let tx = self.bg_tx.clone();
+        let s = sid.clone();
+        tokio::spawn(async move {
+            let v = api.get_session_usage(&s).await;
+            if !v.is_null() {
+                let _ = tx.send(BgEvent::Usage(v));
+            }
+        });
+    }
+
+    async fn show_info_async(&mut self) {
+        self.load_user_info().await;
+        self.load_session_usage_async().await;
+        let plan = if self.user_plan.is_empty() { "—".to_string() } else { self.user_plan.clone() };
+        let credits = if self.user_credits.is_empty() { "—".to_string() } else { self.user_credits.clone() };
+        let name = if self.user_name.is_empty() { "not logged in".to_string() } else { self.user_name.clone() };
+        let usage_credits_used = self.usage_credits_used.clone();
+        let usage_model = self.usage_model.clone();
+        let usage_context_tokens = self.usage_context_tokens.clone();
+        let usage_input_tokens = self.usage_input_tokens.clone();
+        let usage_output_tokens = self.usage_output_tokens.clone();
+        let usage_total_tokens = self.usage_total_tokens.clone();
+
+        // get project name for current session
+        let project_name = if !self.current_project_name.is_empty() {
+            self.current_project_name.clone()
+        } else {
+            self.sid.as_ref().and_then(|sid| {
+                self.sessions.iter().find(|(_, _, id)| id == sid).map(|(pid, _, _)| {
+                    self.project_names.get(pid).cloned().unwrap_or_else(|| short(pid))
+                })
+            }).unwrap_or_default()
+        };
+
+        self.add("sys", "── Account ───────────────────────────");
+        self.add("sys", &format!("  User:     {}", name));
+        self.add("sys", &format!("  Plan:     {}", plan));
+        self.add("sys", &format!("  Credits:  {}", credits));
+        if !usage_credits_used.is_empty() {
+            self.add("sys", &format!("  Used:     {}", usage_credits_used));
+        }
+        if !project_name.is_empty() {
+            self.add("sys", "");
+            self.add("sys", &format!("── Session ({}) ─────────────", short(self.sid.as_deref().unwrap_or("?"))));
+            self.add("sys", &format!("  Project:  {}", project_name));
+            if !usage_model.is_empty() {
+                self.add("sys", &format!("  Model:    {}", usage_model));
+            }
+            if !usage_context_tokens.is_empty() {
+                self.add("sys", &format!("  Context:  {}", usage_context_tokens));
+            }
+            if !usage_input_tokens.is_empty() {
+                self.add("sys", &format!("  Input:    {}", usage_input_tokens));
+            }
+            if !usage_output_tokens.is_empty() {
+                self.add("sys", &format!("  Output:   {}", usage_output_tokens));
+            }
+            if !usage_total_tokens.is_empty() {
+                self.add("sys", &format!("  Total:    {}", usage_total_tokens));
+            }
+        }
+        self.busy_count = self.busy_count.saturating_sub(1);
+    }
+}
+
+/// Extract a string value from a JSON Value, handling both string and number types.
+fn field_val(v: &serde_json::Value) -> String {
+    v.as_str().map(String::from)
+        .or_else(|| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| v.as_f64().map(|n| format!("{:.1}", n)))
+        .unwrap_or_default()
 }

@@ -59,22 +59,45 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mode = if app.api.key.is_empty() {
         Span::styled("  offline", Style::new().fg(DESTRUCTIVE))
     } else {
-        Span::styled("  bridge ◉", Style::new().fg(GREEN))
+        Span::styled("  ◉ online", Style::new().fg(GREEN))
     };
 
     let sid = app.sid.as_ref().map(|s| short(s)).unwrap_or_default();
     let status = if app.busy() { "running" } else { "ready" };
     let status_color = if app.busy() { YELLOW } else { GREEN };
 
+    // build right-side info
+    let mut right = Vec::new();
+    if !app.user_plan.is_empty() {
+        right.push(Span::styled(format!("  {}", app.user_plan), Style::new().fg(DIM)));
+    }
+    if !app.user_credits.is_empty() {
+        right.push(Span::styled(format!("  {}", app.user_credits), Style::new().fg(P_DIM)));
+    }
+    if !app.current_project_name.is_empty() {
+        right.push(Span::styled(format!("  📁{}", app.current_project_name), Style::new().fg(GREEN)));
+    }
+    if !app.usage_context_tokens.is_empty() {
+        right.push(Span::styled(format!("  📐{}", app.usage_context_tokens), Style::new().fg(YELLOW)));
+    }
+    if !app.usage_credits_used.is_empty() {
+        right.push(Span::styled(format!("  💰{}", app.usage_credits_used), Style::new().fg(P_DIM)));
+    }
+    if !sid.is_empty() {
+        right.push(Span::styled(format!("  {}", sid), Style::new().fg(DIM)));
+    }
+
+    let mut line = vec![
+        Span::styled(" ◆ ", Style::new().fg(P).add_modifier(Modifier::BOLD)),
+        Span::styled("Attacca", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled(" ┃ ", Style::new().fg(BORDER)),
+        Span::styled(status, Style::new().fg(status_color).add_modifier(Modifier::BOLD)),
+        mode,
+    ];
+    line.extend(right);
+
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" ◆ ", Style::new().fg(P).add_modifier(Modifier::BOLD)),
-            Span::styled("Attacca", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
-            Span::styled(" ┃ ", Style::new().fg(BORDER)),
-            Span::styled(status, Style::new().fg(status_color).add_modifier(Modifier::BOLD)),
-            mode,
-            Span::styled(format!("  {}", sid), Style::new().fg(DIM)),
-        ])).style(Style::new().bg(CARD)),
+        Paragraph::new(Line::from(line)).style(Style::new().bg(CARD)),
         area,
     );
 
@@ -328,7 +351,7 @@ fn draw_box(f: &mut Frame, app: &App, area: Rect) {
         let items: Vec<ListItem> = suggestions.iter().enumerate().map(|(i, cmd)| {
             let hl = Some(i) == app.autocomplete_idx;
             let desc = match cmd.as_str() {
-                "/exit" => "exit", "/help" => "help", "/sessions" => "sidebar", "/new" => "new chat", "/login" => "set API key", _ => "",
+                "/exit" => "exit", "/help" => "help", "/sessions" => "sidebar", "/new" => "new chat", "/login" => "set API key", "/credits" => "account info", _ => "",
             };
             let s = if hl { Style::new().bg(P).fg(P_FG) } else { Style::new().bg(CARD).fg(TEXT) };
             ListItem::new(Line::from(vec![
