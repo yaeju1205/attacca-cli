@@ -5,21 +5,28 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListItem, Paragraph};
 use ratatui::Frame;
 
-// ── Attacca brand color palette ──
+// ── Attacca.cc 공식 다크 팔레트 ──
 
-const BG: Color = Color::Rgb(10, 10, 18);
-const SURFACE: Color = Color::Rgb(16, 16, 28);
-const BORDER: Color = Color::Rgb(30, 30, 48);
-const ACCENT: Color = Color::Rgb(139, 92, 246);
-const ACCENT_DIM: Color = Color::Rgb(100, 60, 200);
-const TEXT: Color = Color::Rgb(220, 220, 240);
-const DIM: Color = Color::Rgb(100, 100, 130);
-const USER: Color = Color::Rgb(251, 191, 36);
-const AGENT: Color = Color::Rgb(96, 165, 250);
-const TOOL: Color = Color::Rgb(250, 204, 21);
-const GREEN: Color = Color::Rgb(52, 211, 153);
-const RED: Color = Color::Rgb(239, 68, 68);
-const STATUS_BAR: Color = Color::Rgb(20, 20, 35);
+// 배경 계층
+const BG: Color = Color::Rgb(42, 42, 41);        // --background: #2a2a29
+const SURFACE: Color = Color::Rgb(33, 33, 32);    // --card: 약간 밝은 카드 배경
+const SIDEBAR_BG: Color = Color::Rgb(31, 31, 30); // --sidebar: #1f1f1e
+const BORDER: Color = Color::Rgb(70, 70, 68);    // --border: rgba(255,255,255,0.13) over #2a2a29
+
+// 텍스트
+const TEXT: Color = Color::Rgb(236, 235, 235);    // --foreground: #ecebeb
+const DIM: Color = Color::Rgb(155, 154, 152);     // --muted-foreground: #9b9a98
+
+// 브랜드 컬러 (테라코타!)
+const ACCENT: Color = Color::Rgb(213, 115, 94);   // --primary: #d5735e
+const ACCENT_DIM: Color = Color::Rgb(170, 92, 75);
+const TOOL: Color = Color::Rgb(213, 115, 94);
+
+// 역할별 — 사용처에서 직접 ACCENT/DIM/TEXT 사용
+const GREEN: Color = Color::Rgb(82, 173, 110);
+const RED: Color = Color::Rgb(212, 74, 62);       // --destructive: #d44a3e
+
+const STATUS_BAR: Color = Color::Rgb(22, 22, 21);
 
 const SIDEW: u16 = 28;
 
@@ -67,9 +74,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 // ── Sidebar ──
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
-    f.render_widget(Paragraph::new("").style(Style::new().bg(SURFACE)), area);
+    f.render_widget(Paragraph::new("").style(Style::new().bg(SIDEBAR_BG)), area);
 
-    // purple accent line — brighter when focused
+    // accent line — brighter when focused
     let accent_border_color = if app.focus == crate::app::Focus::Sidebar { ACCENT } else { ACCENT_DIM };
     f.render_widget(
         Paragraph::new("").style(Style::new().bg(accent_border_color)),
@@ -80,9 +87,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let header_fg = if app.focus == crate::app::Focus::Sidebar { ACCENT } else { DIM };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ◆ ", Style::new().fg(header_fg).add_modifier(Modifier::BOLD).bg(SURFACE)),
-            Span::styled("sessions", Style::new().fg(if app.focus == crate::app::Focus::Sidebar { TEXT } else { DIM }).add_modifier(Modifier::BOLD).bg(SURFACE)),
-        ])).style(Style::new().bg(SURFACE)),
+            Span::styled(" ◆ ", Style::new().fg(header_fg).add_modifier(Modifier::BOLD).bg(SIDEBAR_BG)),
+            Span::styled("sessions", Style::new().fg(if app.focus == crate::app::Focus::Sidebar { TEXT } else { DIM }).add_modifier(Modifier::BOLD).bg(SIDEBAR_BG)),
+        ])).style(Style::new().bg(SIDEBAR_BG)),
         Rect::new(area.x + 3, area.y, area.width, 1),
     );
 
@@ -100,22 +107,22 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     let style = if highlight {
                         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD).bg(BORDER)
                     } else {
-                        Style::new().fg(ACCENT_DIM).bg(SURFACE)
+                        Style::new().fg(ACCENT_DIM).bg(SIDEBAR_BG)
                     };
                     ListItem::new(Line::from(vec![
                         Span::styled(format!(" {} ", icon), style),
                         Span::styled(short_name(name, 18), style),
-                        Span::styled(format!(" {}", session_count), Style::new().fg(DIM).bg(if highlight { BORDER } else { SURFACE })),
+                        Span::styled(format!(" {}", session_count), Style::new().fg(DIM).bg(if highlight { BORDER } else { SIDEBAR_BG })),
                     ]))
                 }
                 SidebarItem::Session { title, active, .. } => {
                     let dot = if *active { "●" } else { "○" };
                     let style = if *active {
-                        Style::new().fg(AGENT).add_modifier(Modifier::BOLD).bg(if highlight { BORDER } else { SURFACE })
+                        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD).bg(if highlight { BORDER } else { SIDEBAR_BG })
                     } else if highlight {
                         Style::new().fg(TEXT).add_modifier(Modifier::BOLD).bg(BORDER)
                     } else {
-                        Style::new().fg(DIM).bg(SURFACE)
+                        Style::new().fg(DIM).bg(SIDEBAR_BG)
                     };
                     let indent = "  ";
                     ListItem::new(Line::from(vec![
@@ -128,7 +135,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     let style = if highlight {
                         Style::new().fg(GREEN).bg(BORDER)
                     } else {
-                        Style::new().fg(DIM).bg(SURFACE)
+                        Style::new().fg(DIM).bg(SIDEBAR_BG)
                     };
                     ListItem::new(Line::from(vec![Span::styled(label, style)]))
                 }
@@ -137,20 +144,20 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
     let list_area = Rect::new(area.x + 3, area.y + 1, area.width.saturating_sub(3), area.height.saturating_sub(4));
     f.render_widget(
-        List::new(items).style(Style::new().bg(SURFACE)),
+        List::new(items).style(Style::new().bg(SIDEBAR_BG)),
         list_area,
     );
 
     // focus indicator
     let hint_style = if app.focus == crate::app::Focus::Sidebar {
-        Style::new().fg(ACCENT).bg(SURFACE)
+        Style::new().fg(ACCENT).bg(SIDEBAR_BG)
     } else {
-        Style::new().fg(DIM).bg(SURFACE)
+        Style::new().fg(DIM).bg(SIDEBAR_BG)
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ↑↓ enter · tab:chat", hint_style),
-        ])).style(Style::new().bg(SURFACE)),
+        ])).style(Style::new().bg(SIDEBAR_BG)),
         Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
     );
 }
@@ -173,38 +180,38 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                 // card top
                 lines.push(Line::from(Span::styled(
                     "┌─ you ".to_string() + &"─".repeat(w.saturating_sub(8)),
-                    Style::new().fg(USER).add_modifier(Modifier::BOLD),
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 )));
                 // card body
                 for l in m.text.lines() {
                     lines.push(Line::from(vec![
-                        Span::styled("│ ", Style::new().fg(USER)),
+                        Span::styled("│ ", Style::new().fg(ACCENT)),
                         Span::raw(l),
                     ]));
                 }
                 // card bottom
                 lines.push(Line::from(Span::styled(
                     "└".to_string() + &"─".repeat(w.saturating_sub(1)),
-                    Style::new().fg(USER).add_modifier(Modifier::DIM),
+                    Style::new().fg(ACCENT).add_modifier(Modifier::DIM),
                 )));
             }
             "agent" => {
                 // card top
                 lines.push(Line::from(Span::styled(
                     "┌─ assistant ".to_string() + &"─".repeat(w.saturating_sub(13)),
-                    Style::new().fg(AGENT).add_modifier(Modifier::BOLD),
+                    Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
                 )));
                 // card body
                 for l in m.text.lines() {
                     lines.push(Line::from(vec![
-                        Span::styled("│ ", Style::new().fg(AGENT)),
+                        Span::styled("│ ", Style::new().fg(DIM)),
                         Span::raw(l),
                     ]));
                 }
                 // card bottom
                 lines.push(Line::from(Span::styled(
                     "└".to_string() + &"─".repeat(w.saturating_sub(1)),
-                    Style::new().fg(AGENT).add_modifier(Modifier::DIM),
+                    Style::new().fg(DIM).add_modifier(Modifier::DIM),
                 )));
             }
             "tool" if !m.done => {
