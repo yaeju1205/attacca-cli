@@ -316,7 +316,6 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .scroll((off as u16, 0))
-            .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
     );
