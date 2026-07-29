@@ -29,10 +29,10 @@ pub enum SidebarItem {
 }
 
 enum BgEvent {
-    NewMsgs { msgs: Vec<Msg>, new_cur: i64 },
+    NewMsgs { sid: String, msgs: Vec<Msg>, new_cur: i64 },
     SessionCreated(String),
     Usage(serde_json::Value),
-    Done,
+    Done { sid: String },
 }
 
 enum Action {
@@ -140,7 +140,9 @@ impl App {
             // drain ALL pending bg events
             while let Ok(ev) = self.bg_rx.try_recv() {
                 match ev {
-                    BgEvent::NewMsgs { msgs, new_cur } => {
+                    BgEvent::NewMsgs { sid, msgs, new_cur } => {
+                        // Only accept messages for the currently viewed session
+                        if self.sid.as_deref() != Some(&sid) { continue; }
                         self.cur = new_cur;
                         for m in msgs {
                             match m.role.as_str() {
@@ -158,8 +160,11 @@ impl App {
                             }
                         }
                     }
-                    BgEvent::Done => {
-                        self.busy_count = self.busy_count.saturating_sub(1);
+                    BgEvent::Done { sid } => {
+                        // Only decrement busy for the current session
+                        if self.sid.as_deref() == Some(&sid) || self.sid.is_none() {
+                            self.busy_count = self.busy_count.saturating_sub(1);
+                        }
                         // Auto-refresh usage info after a message exchange completes
                         if self.busy_count == 0 && self.sid.is_some() {
                             let api = self.api.clone();
@@ -197,9 +202,15 @@ impl App {
                 }
             }
 
-            // drain action queue
-            while self.busy_count == 0 && !self.actions.is_empty() {
+            // drain action queue — allow non-blocking actions (Open/Create/ShowInfo/Login) even when busy
+            while !self.actions.is_empty() {
                 let action = self.actions.remove(0);
+                let is_send = matches!(&action, Action::Send(_));
+                if is_send && self.busy_count > 0 {
+                    // Can't send while busy — put it back
+                    self.actions.insert(0, action);
+                    break;
+                }
                 self.busy_count += 1;
                 match action {
                     Action::Send(msg) => self.send_async(msg).await,
@@ -598,10 +609,11 @@ impl App {
         tokio::spawn(async move {
             let name = api.whoami().await;
             let _ = tx.send(BgEvent::NewMsgs {
+                sid: String::new(),
                 msgs: vec![Msg { role: "sys".into(), text: format!("logged in — {name}"), raw: None, done: true, cursor: 0 }],
                 new_cur: 0,
             });
-            let _ = tx.send(BgEvent::Done);
+            let _ = tx.send(BgEvent::Done { sid: String::new() });
         });
     }
 
@@ -648,14 +660,14 @@ impl App {
                 }
             }
             if !new_msgs.is_empty() {
-                let _ = tx.send(BgEvent::NewMsgs { msgs: new_msgs, new_cur });
+                let _ = tx.send(BgEvent::NewMsgs { sid: s.clone(), msgs: new_msgs, new_cur });
             }
             // load session usage info
             let v = api.get_session_usage(&s).await;
             if !v.is_null() {
                 let _ = tx.send(BgEvent::Usage(v));
             }
-            let _ = tx.send(BgEvent::Done);
+            let _ = tx.send(BgEvent::Done { sid: s });
         });
     }
 
@@ -674,22 +686,26 @@ impl App {
                 Ok(body) => {
                     if let Ok(v) = serde_json::from_str::<Value>(&body) {
                         if let Some(id) = v["id"].as_str() {
-                            let _ = tx.send(BgEvent::SessionCreated(id.to_string()));
+                            let sid = id.to_string();
+                            let _ = tx.send(BgEvent::SessionCreated(sid.clone()));
                             let _ = tx.send(BgEvent::NewMsgs {
-                                msgs: vec![Msg { role: "sys".into(), text: format!("new session {}", short(id)), raw: None, done: true, cursor: 0 }],
+                                sid: sid.clone(),
+                                msgs: vec![Msg { role: "sys".into(), text: format!("new session {}", short(&sid)), raw: None, done: true, cursor: 0 }],
                                 new_cur: 0,
                             });
+                            let _ = tx.send(BgEvent::Done { sid });
                         }
                     }
                 }
                 Err((c, b)) => {
                     let _ = tx.send(BgEvent::NewMsgs {
+                        sid: String::new(),
                         msgs: vec![Msg { role: "sys".into(), text: format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true, cursor: 0 }],
                         new_cur: 0,
                     });
+                    let _ = tx.send(BgEvent::Done { sid: String::new() });
                 }
             }
-            let _ = tx.send(BgEvent::Done);
         });
     }
 
@@ -711,10 +727,10 @@ impl App {
                             if let Some(id) = v["id"].as_str() {
                                 let _ = tx.send(BgEvent::SessionCreated(id.to_string()));
                                 id.to_string()
-                            } else { let _ = tx.send(BgEvent::Done); return; }
-                        } else { let _ = tx.send(BgEvent::Done); return; }
+                            } else { let _ = tx.send(BgEvent::Done { sid: String::new() }); return; }
+                        } else { let _ = tx.send(BgEvent::Done { sid: String::new() }); return; }
                     }
-                    Err(_) => { let _ = tx.send(BgEvent::Done); return; }
+                    Err(_) => { let _ = tx.send(BgEvent::Done { sid: String::new() }); return; }
                 }
             };
 
@@ -726,7 +742,7 @@ impl App {
             };
 
             if let Err(_) = api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
-                let _ = tx.send(BgEvent::Done); return;
+                let _ = tx.send(BgEvent::Done { sid: sid.clone() }); return;
             }
 
             // 3. Poll loop — deliver messages incrementally
@@ -750,7 +766,7 @@ impl App {
                                 }
                             }
                             if !new_msgs.is_empty() {
-                                let _ = tx.send(BgEvent::NewMsgs { msgs: new_msgs, new_cur: max_cursor });
+                                let _ = tx.send(BgEvent::NewMsgs { sid: sid.clone(), msgs: new_msgs, new_cur: max_cursor });
                             }
                             last_cursor = max_cursor;
                         }
@@ -786,12 +802,12 @@ impl App {
                             }
                         }
                         if !msgs.is_empty() {
-                            let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                            let _ = tx.send(BgEvent::NewMsgs { sid: sid.clone(), msgs, new_cur });
                         }
                     }
                 }
             }
-            let _ = tx.send(BgEvent::Done);
+            let _ = tx.send(BgEvent::Done { sid });
         });
     }
 
@@ -829,7 +845,7 @@ impl App {
                                 }
                             }
                             if !msgs.is_empty() {
-                                let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur: max_cursor });
+                                let _ = tx.send(BgEvent::NewMsgs { sid: sid.clone(), msgs, new_cur: max_cursor });
                             }
                             last_cursor = max_cursor;
                         }
@@ -861,12 +877,12 @@ impl App {
                             }
                         }
                         if !msgs.is_empty() {
-                            let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                            let _ = tx.send(BgEvent::NewMsgs { sid: sid.clone(), msgs, new_cur });
                         }
                     }
                 }
             }
-            let _ = tx.send(BgEvent::Done);
+            let _ = tx.send(BgEvent::Done { sid });
         });
     }
 
@@ -993,11 +1009,12 @@ impl App {
                 }
             }
 
-            let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur: 0 });
+            let sid_str = sid.clone().unwrap_or_default();
+            let _ = tx.send(BgEvent::NewMsgs { sid: sid_str.clone(), msgs, new_cur: 0 });
             if !usage.is_null() {
                 let _ = tx.send(BgEvent::Usage(usage));
             }
-            let _ = tx.send(BgEvent::Done);
+            let _ = tx.send(BgEvent::Done { sid: sid_str });
         });
     }
 }
