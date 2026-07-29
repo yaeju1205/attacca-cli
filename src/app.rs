@@ -426,7 +426,7 @@ impl App {
             let mut new_msgs = Vec::new();
             if let Ok(body) = api.get(&format!("/v1/sessions/{s}/messages?after=0")).await {
                 if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                    for m in msgs.iter().rev() {
+                    for m in msgs.iter() {
                         if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
                         let role = m["role"].as_str().unwrap_or("");
                         let text = m["text"].as_str().unwrap_or("");
