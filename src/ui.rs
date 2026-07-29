@@ -27,8 +27,6 @@ const DESTRUCTIVE: Color = Color::Rgb(232, 88, 84);  // --destructive: #E85854
 
 // border: #FFFDF9 @ 13% over #14100E ≈ #2D2A27
 const BORDER: Color = Color::Rgb(45, 42, 39);
-// input: #FFFDF9 @ 16% over #14100E ≈ #302D2A
-const INPUT_BG: Color = Color::Rgb(32, 26, 23);
 
 const GREEN: Color = Color::Rgb(90, 180, 115);
 const YELLOW: Color = Color::Rgb(220, 175, 65);
@@ -92,13 +90,6 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
     f.render_widget(Paragraph::new("").style(Style::new().bg(POPOVER)), area);
 
-    // accent rail
-    let rail_color = if focused { P } else { P_DIM };
-    f.render_widget(
-        Paragraph::new("").style(Style::new().bg(rail_color)),
-        Rect::new(area.x, 1, 2, area.height.saturating_sub(2)),
-    );
-
     // header
     let fg = if focused { P } else { DIM };
     let text_fg = if focused { TEXT } else { DIM };
@@ -107,7 +98,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" ◆ ", Style::new().fg(fg).add_modifier(Modifier::BOLD).bg(POPOVER)),
             Span::styled("sessions", Style::new().fg(text_fg).add_modifier(Modifier::BOLD).bg(POPOVER)),
         ])).style(Style::new().bg(POPOVER)),
-        Rect::new(area.x + 4, area.y, area.width, 1),
+        Rect::new(area.x + 2, area.y, area.width, 1),
     );
 
     let sel = app.sel;
@@ -157,7 +148,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             }
         }).collect();
 
-    let la = Rect::new(area.x + 4, area.y + 1, area.width.saturating_sub(5), area.height.saturating_sub(4));
+    let la = Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(3), area.height.saturating_sub(4));
     f.render_widget(List::new(items).style(Style::new().bg(POPOVER)), la);
 
     let hint_s = if focused { Style::new().fg(P).bg(POPOVER) } else { Style::new().fg(DIM).bg(POPOVER) };
@@ -174,7 +165,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
-    let w = area.width.saturating_sub(2) as usize;
+    let w = area.width.saturating_sub(1) as usize;
 
     for m in &app.msgs {
         match m.role.as_str() {
@@ -285,12 +276,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 fn draw_box(f: &mut Frame, app: &App, area: Rect) {
     let chat_focused = app.focus == Focus::Chat;
 
-    // separator
+    // thin separator with padding
+    let sep_y = area.y;
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("─".repeat(area.width as usize), Style::new().fg(BORDER)),
-        ])).style(Style::new().bg(INPUT_BG)),
-        Rect::new(area.x, area.y, area.width, 1),
+        ])).style(Style::new().bg(BG)),
+        Rect::new(area.x, sep_y, area.width, 1),
     );
 
     let prompt = if app.busy() {
