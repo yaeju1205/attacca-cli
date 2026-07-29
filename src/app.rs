@@ -215,55 +215,65 @@ impl App {
             }
         }
         self.sidebar_items.push(SidebarItem::NewSession);
-        self.sel = self.sel.min(self.sidebar_items.len().saturating_sub(1));
-        self.sidebar_scroll = 0;
+        let max = self.sidebar_items.len().saturating_sub(1);
+        self.sel = self.sel.min(max);
+        // keep scroll in bounds
+        self.sidebar_scroll = self.sidebar_scroll.min(max.saturating_sub(1));
     }
 
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
+        // Project header expand/collapse with Enter/Right (any context)
+        if let KeyCode::Enter | KeyCode::Right = code {
+            if self.sel < self.sidebar_items.len()
+                && matches!(&self.sidebar_items[self.sel], SidebarItem::ProjectHeader { .. })
+            {
+                self.activate_sidebar_selection();
+                return true;
+            }
+        }
+
+        // Left → collapse parent project
+        if let KeyCode::Left = code {
+            for i in (0..self.sel).rev() {
+                if matches!(&self.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
+                    if let SidebarItem::ProjectHeader { id, .. } = &self.sidebar_items[i].clone() {
+                        self.expanded_projects.remove(id);
+                        self.rebuild_sidebar();
+                        self.sel = i;
+                    }
+                    break;
+                }
+            }
+            return true;
+        }
+
+        // ── Chat scroll ──
         match code {
-            // Sidebar navigation (always active)
-            KeyCode::Up | KeyCode::Down if self.sidebar_items.len() > 1 => {
-                match code {
-                    KeyCode::Up => { if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); } }
-                    KeyCode::Down => {
-                        let max = self.sidebar_items.len().saturating_sub(1);
-                        if self.sel < max { self.sel += 1; self.clamp_sidebar_scroll(); }
-                    }
-                    _ => {}
-                }
+            KeyCode::Up => {
+                if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
+                else if self.scroll == usize::MAX { self.scroll = 0; }
                 return true;
             }
-            KeyCode::Enter | KeyCode::Right => {
-                // If sidebar has focus (any item exists), activate selection
-                if self.sel < self.sidebar_items.len() {
-                    let is_project = matches!(&self.sidebar_items[self.sel], SidebarItem::ProjectHeader { .. });
-                    if is_project {
-                        self.activate_sidebar_selection();
-                        return true;
-                    }
-                }
-                // Fall through to input handling for non-project items
-                // For sessions and new, Enter goes to input
-            }
-            KeyCode::Left => {
-                for i in (0..self.sel).rev() {
-                    if matches!(&self.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
-                        if let SidebarItem::ProjectHeader { id, .. } = &self.sidebar_items[i].clone() {
-                            self.expanded_projects.remove(id);
-                            self.rebuild_sidebar();
-                            self.sel = i;
-                        }
-                        break;
-                    }
-                }
+            KeyCode::Down => {
+                if self.scroll != usize::MAX { self.scroll += 1; }
                 return true;
             }
+            KeyCode::PageUp => {
+                self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 };
+                return true;
+            }
+            KeyCode::PageDown => {
+                if self.scroll != usize::MAX { self.scroll = self.scroll.saturating_add(10); }
+                return true;
+            }
+            KeyCode::Home => { self.scroll = 0; return true; }
+            KeyCode::End => { self.scroll = usize::MAX; return true; }
             _ => {}
         }
 
-        // ── Input handling ──
+        // ── Input ──
         match code {
             KeyCode::Tab => {
                 self.tab_autocomplete();
@@ -271,6 +281,17 @@ impl App {
             KeyCode::Enter => {
                 let m = self.input.trim().to_string();
                 if !m.is_empty() {
+                    // Check if typing a session title — activate it
+                    for item in &self.sidebar_items {
+                        if let SidebarItem::Session { title, id, .. } = item {
+                            if title == &m {
+                                self.input.clear();
+                                self.tab_candidate = None;
+                                self.actions.push(Action::Open(id.clone()));
+                                return true;
+                            }
+                        }
+                    }
                     self.input.clear();
                     self.tab_candidate = None;
                     match m.as_str() {
@@ -298,15 +319,6 @@ impl App {
                 self.input.pop();
                 self.tab_candidate = None;
             }
-            KeyCode::Up => {
-                if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
-                else if self.scroll == usize::MAX { self.scroll = 0; }
-            }
-            KeyCode::Down => { if self.scroll != usize::MAX { self.scroll += 1; } }
-            KeyCode::PageUp => { self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 }; }
-            KeyCode::PageDown => { if self.scroll != usize::MAX { self.scroll = self.scroll.saturating_add(10); } }
-            KeyCode::Home => { self.scroll = 0; }
-            KeyCode::End => { self.scroll = usize::MAX; }
             _ => {}
         }
         true
@@ -360,15 +372,6 @@ impl App {
         }
     }
 
-    fn clamp_sidebar_scroll(&mut self) {
-        let vis = 12usize;
-        if self.sel < self.sidebar_scroll {
-            self.sidebar_scroll = self.sel;
-        } else if self.sel >= self.sidebar_scroll + vis {
-            self.sidebar_scroll = self.sel.saturating_sub(vis) + 1;
-        }
-    }
-
     // ── Async operations ──
 
     async fn open_async(&mut self, sid: &str) {
@@ -391,6 +394,7 @@ impl App {
             }
         }
         self.add("sys", &format!("opened {}", short(sid)));
+        self.rebuild_sidebar();
         self.busy = false;
     }
 
