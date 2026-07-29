@@ -152,11 +152,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let la = Rect::new(area.x + 4, area.y + 1, area.width.saturating_sub(5), area.height.saturating_sub(4));
     f.render_widget(List::new(items).style(Style::new().bg(SIDEBAR_BG)), la);
 
-    // hint
-    let hint_s = if focused { Style::new().fg(P).bg(SIDEBAR_BG) } else { Style::new().fg(DIM).bg(SIDEBAR_BG) };
+    // hint + action bar
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled("  ↑↓ · enter · tab:chat", hint_s)]))
-            .style(Style::new().bg(SIDEBAR_BG)),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  ↑↓·enter  ", if focused { Style::new().fg(P).bg(SIDEBAR_BG) } else { Style::new().fg(DIM).bg(SIDEBAR_BG) }),
+            Span::styled("+new", Style::new().fg(GREEN).add_modifier(Modifier::BOLD).bg(SIDEBAR_BG)),
+        ])).style(Style::new().bg(SIDEBAR_BG)),
         Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
     );
 }

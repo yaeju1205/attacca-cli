@@ -168,8 +168,9 @@ impl App {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
+                                const S: usize = 3;
                                 if m.column < 30 {
-                                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1)
+                                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(S)
                                         .min(self.sidebar_items.len().saturating_sub(1));
                                     let max_vis = (12usize).min(self.sidebar_items.len());
                                     if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
@@ -177,29 +178,30 @@ impl App {
                                         self.sel = self.sidebar_scroll + max_vis - 1;
                                     }
                                 } else {
-                                    // chat scroll
+                                    // chat scroll — 3 lines per tick
                                     if self.at_end {
                                         self.at_end = false;
-                                        self.scroll = 0;
+                                        self.scroll = S;
                                     } else {
-                                        self.scroll = self.scroll.saturating_add(1);
+                                        self.scroll = self.scroll.saturating_add(S);
                                     }
                                 }
                             }
                             MouseEventKind::ScrollUp => {
+                                const S: usize = 3;
                                 if m.column < 30 {
-                                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+                                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(S);
                                     if self.sel >= self.sidebar_scroll + 12 {
                                         self.sel = self.sidebar_scroll + 11;
                                     }
                                 } else {
-                                    // chat scroll
+                                    // chat scroll — 3 lines per tick
                                     if self.at_end || self.scroll > 0 {
                                         if self.at_end {
                                             self.at_end = false;
                                             self.scroll = 0;
                                         } else {
-                                            self.scroll -= 1;
+                                            self.scroll = self.scroll.saturating_sub(S);
                                         }
                                     }
                                 }
@@ -325,18 +327,19 @@ impl App {
     }
 
     fn handle_chat(&mut self, code: KeyCode) -> bool {
+        const SCROLL_SPEED: usize = 3;
         match code {
             KeyCode::Up => {
                 if self.at_end {
                     self.at_end = false;
                     self.scroll = 0;
                 } else if self.scroll > 0 {
-                    self.scroll -= 1;
+                    self.scroll = self.scroll.saturating_sub(SCROLL_SPEED);
                 }
             }
             KeyCode::Down => {
                 if !self.at_end {
-                    self.scroll += 1;
+                    self.scroll = self.scroll.saturating_add(SCROLL_SPEED);
                 }
             }
             KeyCode::PageUp => {
