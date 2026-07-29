@@ -304,19 +304,23 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // ── 2. Scroll to the right position ──
+    // ── 2. Scroll to show the last messages ──
     //
-    // ratatui's `.scroll()` operates on LOGICAL lines (not visual rows).
-    // When at_end, skip the oldest lines to show the recent portion.
-    // When scrolled up, subtract additional lines.
+    // With .wrap(), one logical line can become multiple visual lines.
+    // Using all visual rows for logical lines would cause the last
+    // half of the content to get clipped (hidden behind the input box).
+    //
+    // Fix: show only about half the available rows as logical lines,
+    // leaving room for .wrap() to expand them within the area.
 
     let total = lines.len();
-    let max_rows = area.height.saturating_sub(1) as usize;
+    let visual_rows = area.height.saturating_sub(1) as usize;
+    let safe_count = (visual_rows / 2).max(3); // logical lines that fit after wrapping
 
-    let scroll_off = if app.at_end || total <= max_rows {
-        total.saturating_sub(max_rows)
+    let scroll_off = if app.at_end || total <= safe_count {
+        total.saturating_sub(safe_count)
     } else {
-        total.saturating_sub(max_rows).saturating_sub(app.scroll)
+        total.saturating_sub(safe_count).saturating_sub(app.scroll)
     };
 
     // ── 3. Render ──
