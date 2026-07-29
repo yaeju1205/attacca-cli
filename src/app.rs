@@ -45,6 +45,7 @@ pub struct App {
     pub msgs: Vec<Msg>,
     pub input: String,
     pub scroll: usize,
+    pub at_end: bool,
     pub busy: bool,
     pub sidebar_items: Vec<SidebarItem>,
     pub sel: usize,
@@ -74,7 +75,7 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             api, sid: None, cur: 0, msgs: vec![], input: String::new(),
-            scroll: 0, busy: false, sidebar_items: vec![], sel: 0,
+            scroll: 0, at_end: true, busy: false, sidebar_items: vec![], sel: 0,
             sidebar_scroll: 0, first: true, sessions: vec![],
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
@@ -177,7 +178,10 @@ impl App {
                                     }
                                 } else {
                                     // chat scroll
-                                    if self.scroll != usize::MAX {
+                                    if self.at_end {
+                                        self.at_end = false;
+                                        self.scroll = 0;
+                                    } else {
                                         self.scroll = self.scroll.saturating_add(1);
                                     }
                                 }
@@ -190,10 +194,13 @@ impl App {
                                     }
                                 } else {
                                     // chat scroll
-                                    if self.scroll > 0 && self.scroll != usize::MAX {
-                                        self.scroll -= 1;
-                                    } else if self.scroll == usize::MAX {
-                                        self.scroll = 0;
+                                    if self.at_end || self.scroll > 0 {
+                                        if self.at_end {
+                                            self.at_end = false;
+                                            self.scroll = 0;
+                                        } else {
+                                            self.scroll -= 1;
+                                        }
                                     }
                                 }
                             }
@@ -215,7 +222,9 @@ impl App {
     fn add(&mut self, role: &str, text: &str) {
         if text.trim().is_empty() { return; }
         self.msgs.push(Msg { role: role.into(), text: text.into(), raw: None, done: false });
-        self.scroll = usize::MAX;
+        if self.at_end {
+            self.scroll = 0; // doesn't matter — at_end overrides
+        }
     }
 
     fn add_tool(&mut self, json: &str) {
@@ -225,7 +234,7 @@ impl App {
             .map(|o| o.iter().filter_map(|(k, vv)| Some(format!("{k}={}", vv.as_str()?))).collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
         self.msgs.push(Msg { role: "tool".into(), text: format!("◆ {tool} {args}"), raw: Some(json.into()), done: false });
-        self.scroll = usize::MAX;
+        if self.at_end { self.scroll = 0; }
     }
 
     pub fn rebuild_sidebar(&mut self) {
@@ -318,20 +327,33 @@ impl App {
     fn handle_chat(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Up => {
-                if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
-                else if self.scroll == usize::MAX { self.scroll = 0; }
+                if self.at_end {
+                    self.at_end = false;
+                    self.scroll = 0;
+                } else if self.scroll > 0 {
+                    self.scroll -= 1;
+                }
             }
             KeyCode::Down => {
-                if self.scroll != usize::MAX { self.scroll += 1; }
+                if !self.at_end {
+                    self.scroll += 1;
+                }
             }
             KeyCode::PageUp => {
-                self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 };
+                if self.at_end {
+                    self.at_end = false;
+                    self.scroll = 0;
+                } else {
+                    self.scroll = self.scroll.saturating_sub(10);
+                }
             }
             KeyCode::PageDown => {
-                if self.scroll != usize::MAX { self.scroll = self.scroll.saturating_add(10); }
+                if !self.at_end {
+                    self.scroll = self.scroll.saturating_add(10);
+                }
             }
-            KeyCode::Home => { self.scroll = 0; }
-            KeyCode::End => { self.scroll = usize::MAX; }
+            KeyCode::Home => { self.at_end = false; self.scroll = 0; }
+            KeyCode::End => { self.at_end = true; self.scroll = 0; }
             KeyCode::Enter => {
                 let m = self.input.trim().to_string();
                 if !m.is_empty() {
@@ -433,6 +455,7 @@ impl App {
         self.first = false;
         self.msgs.clear();
         self.scroll = 0;
+        self.at_end = true;
         self.add("sys", &format!("loading {}", short(sid)));
         self.rebuild_sidebar();
 
@@ -470,6 +493,7 @@ impl App {
         self.first = true;
         self.msgs.clear();
         self.scroll = 0;
+        self.at_end = true;
         match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
             Ok(body) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&body) {

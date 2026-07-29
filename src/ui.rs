@@ -259,7 +259,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
     let max_vis = area.height.saturating_sub(1) as usize;
     let total = lines.len();
-    let off = if app.scroll == usize::MAX || total <= max_vis {
+    let off = if app.at_end || total <= max_vis {
         total.saturating_sub(max_vis)
     } else {
         app.scroll.min(total.saturating_sub(max_vis))
