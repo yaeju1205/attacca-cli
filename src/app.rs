@@ -12,6 +12,8 @@ use std::io;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+const SLASH_COMMANDS: &[&str] = &["/exit", "/help", "/sessions", "/new"];
+
 #[derive(Clone)]
 pub struct Msg {
     pub role: String,
@@ -49,11 +51,12 @@ pub struct App {
     pub sidebar_items: Vec<SidebarItem>,
     pub sel: usize,
     pub sidebar_scroll: usize,
-    pub show_sidebar: bool,
     pub first: bool,
     pub sessions: Vec<(String, String, String)>,
     expanded_projects: std::collections::HashSet<String>,
     project_names: HashMap<String, String>,
+    exit_requested: bool,
+    tab_candidate: Option<usize>,
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
@@ -66,9 +69,11 @@ impl App {
         Self {
             api, sid: None, cur: 0, msgs: vec![], input: String::new(),
             scroll: 0, busy: false, sidebar_items: vec![], sel: 0,
-            sidebar_scroll: 0, show_sidebar: false, first: true, sessions: vec![],
+            sidebar_scroll: 0, first: true, sessions: vec![],
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
+            exit_requested: false,
+            tab_candidate: None,
             bg_tx: tx, bg_rx: rx, actions: vec![],
         }
     }
@@ -84,10 +89,11 @@ impl App {
         term.clear().ok();
         self.load_sessions().await;
         self.load_projects().await;
-        self.add("sys", "attacca — enter:send  tab:sessions  y/n:tool  /exit");
+        self.add("sys", "attacca — enter:send  tab:autocomplete  y/n:tool  /exit");
 
         loop {
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
+            if self.exit_requested { break; }
 
             // drain bg events (poll results)
             while let Ok(ev) = self.bg_rx.try_recv() {
@@ -118,11 +124,10 @@ impl App {
                 continue;
             }
 
-            // poll keyboard
+            // poll keyboard & mouse
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
-                        // Ctrl+C → exit
                         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                             break;
                         }
@@ -130,30 +135,28 @@ impl App {
                             && !self.handle_key(k.code) { break; }
                     }
                     Ok(Event::Mouse(m)) => {
-                        if self.show_sidebar {
-                            let max_vis = 12usize;
-                            match m.kind {
-                                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                    let list_row = m.row.saturating_sub(2) as usize;
-                                    let idx = list_row + self.sidebar_scroll;
-                                    if idx < self.sidebar_items.len() {
-                                        self.sel = idx;
-                                        self.activate_sidebar_selection();
-                                    }
+                        let max_vis = 12usize;
+                        match m.kind {
+                            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                let list_row = m.row.saturating_sub(2) as usize;
+                                let idx = list_row + self.sidebar_scroll;
+                                if idx < self.sidebar_items.len() {
+                                    self.sel = idx;
+                                    self.activate_sidebar_selection();
                                 }
-                                MouseEventKind::ScrollDown => {
-                                    if self.sidebar_scroll + max_vis < self.sidebar_items.len() {
-                                        self.sidebar_scroll += 3;
-                                        let max = self.sidebar_items.len().saturating_sub(1);
-                                        if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
-                                        if self.sel > max { self.sel = max; }
-                                    }
-                                }
-                                MouseEventKind::ScrollUp => {
-                                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(3);
-                                }
-                                _ => {}
                             }
+                            MouseEventKind::ScrollDown => {
+                                if self.sidebar_scroll + max_vis < self.sidebar_items.len() {
+                                    self.sidebar_scroll += 3;
+                                    let max = self.sidebar_items.len().saturating_sub(1);
+                                    if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
+                                    if self.sel > max { self.sel = max; }
+                                }
+                            }
+                            MouseEventKind::ScrollUp => {
+                                self.sidebar_scroll = self.sidebar_scroll.saturating_sub(3);
+                            }
+                            _ => {}
                         }
                     }
                     Ok(_) => {}
@@ -163,8 +166,9 @@ impl App {
                 Err(_) => break,
             }
         }
+        // cleanup — runs on Ctrl+C or /exit
         terminal::disable_raw_mode().ok();
-        crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture).ok();
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
     }
 
     fn add(&mut self, role: &str, text: &str) {
@@ -218,82 +222,125 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        if self.show_sidebar {
-            match code {
-                KeyCode::Tab | KeyCode::Esc => { self.show_sidebar = false; return true; }
-                KeyCode::Up => {
-                    if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); }
-                    return true;
+        match code {
+            // Sidebar navigation (always active)
+            KeyCode::Up | KeyCode::Down if self.sidebar_items.len() > 1 => {
+                match code {
+                    KeyCode::Up => { if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); } }
+                    KeyCode::Down => {
+                        let max = self.sidebar_items.len().saturating_sub(1);
+                        if self.sel < max { self.sel += 1; self.clamp_sidebar_scroll(); }
+                    }
+                    _ => {}
                 }
-                KeyCode::Down => {
-                    let max = self.sidebar_items.len().saturating_sub(1);
-                    if self.sel < max { self.sel += 1; self.clamp_sidebar_scroll(); }
-                    return true;
-                }
-                KeyCode::Enter | KeyCode::Right => {
-                    if self.sel < self.sidebar_items.len() {
+                return true;
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                // If sidebar has focus (any item exists), activate selection
+                if self.sel < self.sidebar_items.len() {
+                    let is_project = matches!(&self.sidebar_items[self.sel], SidebarItem::ProjectHeader { .. });
+                    if is_project {
                         self.activate_sidebar_selection();
+                        return true;
                     }
-                    return true;
                 }
-                KeyCode::Left => {
-                    for i in (0..self.sel).rev() {
-                        if matches!(&self.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
-                            if let SidebarItem::ProjectHeader { id, .. } = &self.sidebar_items[i].clone() {
-                                self.expanded_projects.remove(id);
-                                self.rebuild_sidebar();
-                                self.sel = i;
-                            }
-                            break;
-                        }
-                    }
-                    return true;
-                }
-                _ => {}
+                // Fall through to input handling for non-project items
+                // For sessions and new, Enter goes to input
             }
-        } else {
-            match code {
-                KeyCode::Tab => {
-                    self.show_sidebar = true;
-                    self.rebuild_sidebar();
-                    self.sel = self.sel.min(self.sidebar_items.len().saturating_sub(1));
-                }
-                KeyCode::Enter => {
-                    let m = self.input.trim().to_string();
-                    if !m.is_empty() {
-                        self.input.clear();
-                        match m.as_str() {
-                            "/exit" | "/quit" => std::process::exit(0),
-                            "/help" | "/h" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); return true; }
-                            "/sessions" | "/s" => { self.show_sidebar = true; return true; }
-                            "/new" | "/n" => { self.actions.push(Action::Create); return true; }
-                            _ => {}
+            KeyCode::Left => {
+                for i in (0..self.sel).rev() {
+                    if matches!(&self.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
+                        if let SidebarItem::ProjectHeader { id, .. } = &self.sidebar_items[i].clone() {
+                            self.expanded_projects.remove(id);
+                            self.rebuild_sidebar();
+                            self.sel = i;
                         }
-                        self.add("user", &m);
-                        if self.api.key.is_empty() {
-                            self.add("sys", "no API key — set ATTACCA_API_KEY");
-                            return true;
-                        }
-                        self.actions.push(Action::Send(m));
+                        break;
                     }
                 }
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true),
-                KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false),
-                KeyCode::Char(c) => self.input.push(c),
-                KeyCode::Backspace => { self.input.pop(); }
-                KeyCode::Up => {
-                    if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
-                    else if self.scroll == usize::MAX { self.scroll = 0; }
-                }
-                KeyCode::Down => { if self.scroll != usize::MAX { self.scroll += 1; } }
-                KeyCode::PageUp => { self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 }; }
-                KeyCode::PageDown => { if self.scroll != usize::MAX { self.scroll = self.scroll.saturating_add(10); } }
-                KeyCode::Home => { self.scroll = 0; }
-                KeyCode::End => { self.scroll = usize::MAX; }
-                _ => {}
+                return true;
             }
+            _ => {}
+        }
+
+        // ── Input handling ──
+        match code {
+            KeyCode::Tab => {
+                self.tab_autocomplete();
+            }
+            KeyCode::Enter => {
+                let m = self.input.trim().to_string();
+                if !m.is_empty() {
+                    self.input.clear();
+                    self.tab_candidate = None;
+                    match m.as_str() {
+                        "/exit" | "/quit" => { self.exit_requested = true; return true; }
+                        "/help" | "/h" => { self.add("sys", "enter:send  tab:autocomplete  y/n:tool  ↑↓:scroll"); return true; }
+                        "/sessions" | "/s" => { return true; }
+                        "/new" | "/n" => { self.actions.push(Action::Create); return true; }
+                        _ => {}
+                    }
+                    self.add("user", &m);
+                    if self.api.key.is_empty() {
+                        self.add("sys", "no API key — set ATTACCA_API_KEY");
+                        return true;
+                    }
+                    self.actions.push(Action::Send(m));
+                }
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true),
+            KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false),
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                self.tab_candidate = None;
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                self.tab_candidate = None;
+            }
+            KeyCode::Up => {
+                if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
+                else if self.scroll == usize::MAX { self.scroll = 0; }
+            }
+            KeyCode::Down => { if self.scroll != usize::MAX { self.scroll += 1; } }
+            KeyCode::PageUp => { self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 }; }
+            KeyCode::PageDown => { if self.scroll != usize::MAX { self.scroll = self.scroll.saturating_add(10); } }
+            KeyCode::Home => { self.scroll = 0; }
+            KeyCode::End => { self.scroll = usize::MAX; }
+            _ => {}
         }
         true
+    }
+
+    fn tab_autocomplete(&mut self) {
+        let trimmed = self.input.trim_start();
+        if !trimmed.starts_with('/') {
+            // not a command — insert tab character
+            self.input.push('\t');
+            return;
+        }
+        // find matching commands
+        let matching: Vec<&str> = SLASH_COMMANDS.iter()
+            .filter(|cmd| cmd.starts_with(trimmed))
+            .copied()
+            .collect();
+        if matching.is_empty() { return; }
+        if matching.len() == 1 {
+            self.input = matching[0].to_string();
+            self.input.push(' '); // space after completing
+            self.tab_candidate = None;
+            return;
+        }
+        // cycle through
+        let idx = self.tab_candidate.unwrap_or(usize::MAX);
+        let next = if idx >= matching.len() { 0 } else { idx + 1 };
+        if next >= matching.len() {
+            self.input = trimmed.to_string();
+            self.tab_candidate = None;
+        } else {
+            self.input = matching[next].to_string();
+            self.tab_candidate = Some(next);
+        }
     }
 
     fn activate_sidebar_selection(&mut self) {
@@ -305,11 +352,9 @@ impl App {
                 self.rebuild_sidebar();
             }
             SidebarItem::Session { id, .. } => {
-                self.show_sidebar = false;
                 self.actions.push(Action::Open(id));
             }
             SidebarItem::NewSession => {
-                self.show_sidebar = false;
                 self.actions.push(Action::Create);
             }
         }
@@ -332,7 +377,6 @@ impl App {
         self.first = false;
         self.msgs.clear();
         self.scroll = 0;
-
         if let Ok(body) = self.api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
             if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                 for m in msgs.iter().rev() {
@@ -355,7 +399,6 @@ impl App {
         self.first = true;
         self.msgs.clear();
         self.scroll = 0;
-
         match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
             Ok(body) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&body) {
@@ -378,7 +421,6 @@ impl App {
     }
 
     async fn send_async(&mut self, raw: String) {
-        // ensure session exists
         if self.sid.is_none() {
             match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
                 Ok(body) => {
@@ -398,7 +440,6 @@ impl App {
                 }
             }
         }
-
         let Some(ref sid) = self.sid.clone() else { self.busy = false; return; };
         let payload = if self.first {
             self.first = false;
@@ -406,14 +447,10 @@ impl App {
         } else {
             raw
         };
-
-        // send (async, fast)
         if let Err((c, b)) = self.api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
             self.add("sys", &format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
             self.busy = false; return;
         }
-
-        // wait + read in bg task
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
         let c = self.cur;
@@ -449,8 +486,6 @@ impl App {
             }
             let _ = tx.send(BgEvent::Done);
         });
-        // busy stays true until bg sends Done
-        // Don't set busy=false here — bg will send Done
     }
 
     // ── Tool approval ──
@@ -465,8 +500,6 @@ impl App {
         if !yes || self.sid.is_none() { return; }
         let sid = self.sid.clone().unwrap();
         self.busy = true;
-
-        // send result + poll in bg
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
         let cur = self.cur;

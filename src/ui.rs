@@ -70,14 +70,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 // ── Main Layout ──
 
 fn draw_main(f: &mut Frame, app: &App, area: Rect) {
-    if app.show_sidebar {
-        let c = Layout::default().direction(Direction::Horizontal)
-            .constraints([Constraint::Length(SIDEW), Constraint::Min(30)]).split(area);
-        draw_sidebar(f, app, c[0]);
-        draw_chat(f, app, c[1]);
-    } else {
-        draw_chat(f, app, area);
-    }
+    let c = Layout::default().direction(Direction::Horizontal)
+        .constraints([Constraint::Length(SIDEW), Constraint::Min(30)]).split(area);
+    draw_sidebar(f, app, c[0]);
+    draw_chat(f, app, c[1]);
 }
 
 // ── Sidebar ──
