@@ -21,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new("").style(Style::new().bg(BG)), a);
 
-    // Input area height: dynamic based on \n-separated lines (1 separator + 1~6 content lines)
+    // Input area height: one line per \n-segment (max 6), no word-wrap.
     let n_lines = app.input.split('\n').count().max(1).min(6) as u16;
     let input_total = n_lines + 1; // +1 for separator
 
