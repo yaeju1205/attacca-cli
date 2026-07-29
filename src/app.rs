@@ -59,6 +59,7 @@ pub struct App {
     pub focus: Focus,
     pub autocomplete_suggestions: Vec<String>,
     pub autocomplete_idx: Option<usize>,
+    dirty: bool, // needs redraw
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
@@ -81,6 +82,7 @@ impl App {
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
             exit_requested: false,
+            dirty: true,
             focus: Focus::Chat,
             autocomplete_suggestions: vec![],
             autocomplete_idx: None,
@@ -102,14 +104,18 @@ impl App {
         self.add("sys", "attacca — enter:send  tab:autocomplete  y/n:tool  /exit");
 
         loop {
-            // draw (use try_draw — non-blocking render)
-            let _ = term.draw(|f| ui::draw(f, self));
+            // draw only when dirty
+            if self.dirty {
+                let _ = term.draw(|f| ui::draw(f, self));
+                self.dirty = false;
+            }
             if self.exit_requested { break; }
 
             // drain bg events (poll results) — non-blocking
             while let Ok(ev) = self.bg_rx.try_recv() {
                 match ev {
                     BgEvent::NewMsgs { msgs, new_cur } => {
+                        self.dirty = true;
                         self.cur = new_cur;
                         for m in msgs {
                             match m.role.as_str() {
@@ -127,8 +133,9 @@ impl App {
                             }
                         }
                     }
-                    BgEvent::Done => { self.busy = false; }
+                    BgEvent::Done => { self.dirty = true; self.busy = false; }
                     BgEvent::SessionCreated(sid) => {
+                        self.dirty = true;
                         if self.sid.is_none() {
                             self.sid = Some(sid);
                         }
@@ -148,8 +155,8 @@ impl App {
                 // don't continue — let event poll happen
             }
 
-            // poll events — shorter timeout for responsive feel
-            match event::poll(Duration::from_millis(16)) { // ~60fps
+            // poll events
+            match event::poll(Duration::from_millis(30)) { // ~33 fps — instant feel, low CPU
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
                         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
@@ -228,6 +235,7 @@ impl App {
     }
 
     fn add(&mut self, role: &str, text: &str) {
+        self.dirty = true;
         if text.trim().is_empty() { return; }
         self.msgs.push(Msg { role: role.into(), text: text.into(), raw: None, done: false });
         if self.at_end {
@@ -236,6 +244,7 @@ impl App {
     }
 
     fn add_tool(&mut self, json: &str) {
+        self.dirty = true;
         let v: Value = serde_json::from_str(json).unwrap_or_default();
         let tool = v["tool"].as_str().unwrap_or("?");
         let args = v.get("args").and_then(|a| a.as_object())
@@ -282,6 +291,7 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
+        self.dirty = true;
         // Tab: cycle autocomplete suggestions if any, else toggle focus
         if code == KeyCode::Tab {
             if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
