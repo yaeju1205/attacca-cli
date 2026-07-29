@@ -91,6 +91,10 @@ impl App {
     /// Counter-based busy check — NEVER gets stuck.
     pub fn busy(&self) -> bool { self.busy_count > 0 }
 
+    fn has_pending_tool(&self) -> bool {
+        self.msgs.iter().any(|m| m.raw.is_some() && !m.done)
+    }
+
     pub async fn run(&mut self) {
         terminal::enable_raw_mode().ok();
         let mut stdout = io::stdout();
@@ -280,11 +284,14 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        // y/n for tool approval — ALWAYS works, regardless of focus
-        match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => { self.approve(true); return true; }
-            KeyCode::Char('n') | KeyCode::Char('N') => { self.approve(false); return true; }
-            _ => {}
+        // y/n for tool approval — only intercept when a tool is pending
+        if let KeyCode::Char(c) = code {
+            if (c == 'y' || c == 'Y') && self.has_pending_tool() {
+                self.approve(true); return true;
+            }
+            if (c == 'n' || c == 'N') && self.has_pending_tool() {
+                self.approve(false); return true;
+            }
         }
 
         // Tab: cycle autocomplete suggestions if any, else toggle focus
