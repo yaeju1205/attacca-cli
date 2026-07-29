@@ -155,10 +155,11 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-// ── Chat ──
+// ── Chat (card-style messages) ──
 
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
+    let w = area.width as usize;
 
     for m in &app.msgs {
         match m.role.as_str() {
@@ -169,48 +170,75 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
             "user" => {
-                lines.push(Line::from(vec![
-                    Span::styled(" ── ", Style::new().fg(USER).add_modifier(Modifier::BOLD)),
-                    Span::styled("you", Style::new().fg(USER).add_modifier(Modifier::BOLD)),
-                ]));
+                // card top
+                lines.push(Line::from(Span::styled(
+                    "┌─ you ".to_string() + &"─".repeat(w.saturating_sub(8)),
+                    Style::new().fg(USER).add_modifier(Modifier::BOLD),
+                )));
+                // card body
                 for l in m.text.lines() {
                     lines.push(Line::from(vec![
-                        Span::styled(" │ ", Style::new().fg(DIM)),
+                        Span::styled("│ ", Style::new().fg(USER)),
                         Span::raw(l),
                     ]));
                 }
+                // card bottom
+                lines.push(Line::from(Span::styled(
+                    "└".to_string() + &"─".repeat(w.saturating_sub(1)),
+                    Style::new().fg(USER).add_modifier(Modifier::DIM),
+                )));
             }
             "agent" => {
-                for (i, l) in m.text.lines().enumerate() {
-                    if i == 0 {
-                        lines.push(Line::from(vec![
-                            Span::styled(" ", Style::new().fg(AGENT)),
-                            Span::styled("assistant", Style::new().fg(AGENT).add_modifier(Modifier::BOLD)),
-                        ]));
-                    }
-                    lines.push(Line::from(Span::raw(format!(" {}", l))));
+                // card top
+                lines.push(Line::from(Span::styled(
+                    "┌─ assistant ".to_string() + &"─".repeat(w.saturating_sub(13)),
+                    Style::new().fg(AGENT).add_modifier(Modifier::BOLD),
+                )));
+                // card body
+                for l in m.text.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", Style::new().fg(AGENT)),
+                        Span::raw(l),
+                    ]));
                 }
+                // card bottom
+                lines.push(Line::from(Span::styled(
+                    "└".to_string() + &"─".repeat(w.saturating_sub(1)),
+                    Style::new().fg(AGENT).add_modifier(Modifier::DIM),
+                )));
             }
             "tool" if !m.done => {
+                lines.push(Line::from(Span::styled(
+                    "┌─ tool ".to_string() + &"─".repeat(w.saturating_sub(8)),
+                    Style::new().fg(TOOL).add_modifier(Modifier::BOLD),
+                )));
                 lines.push(Line::from(vec![
-                    Span::styled(" ◆ ", Style::new().fg(TOOL).add_modifier(Modifier::BOLD)),
+                    Span::styled("│ ", Style::new().fg(TOOL)),
                     Span::styled(&m.text, Style::new().fg(TOOL)),
                 ]));
                 lines.push(Line::from(vec![
-                    Span::styled("    [", Style::new().fg(DIM)),
+                    Span::styled("│ ", Style::new().fg(TOOL)),
+                    Span::styled("[", Style::new().fg(DIM)),
                     Span::styled("y", Style::new().fg(GREEN).add_modifier(Modifier::BOLD)),
                     Span::styled("] run  [", Style::new().fg(DIM)),
                     Span::styled("n", Style::new().fg(RED).add_modifier(Modifier::BOLD)),
                     Span::styled("] skip", Style::new().fg(DIM)),
                 ]));
+                lines.push(Line::from(Span::styled(
+                    "└".to_string() + &"─".repeat(w.saturating_sub(1)),
+                    Style::new().fg(TOOL).add_modifier(Modifier::DIM),
+                )));
             }
             "tool" => {}
             "result" => {
                 if let Some(first) = m.text.lines().next() {
                     let ok = !m.text.starts_with("err") && !m.text.starts_with("skipped");
-                    let prefix = if ok { " ✔" } else { " ✖" };
+                    let (icon, color) = if ok { (" ✔", GREEN) } else { (" ✖", RED) };
                     let label: String = first.chars().take(60).collect();
-                    lines.push(Line::from(vec![Span::styled(format!("  {prefix} {label}"), Style::new().fg(if ok { GREEN } else { RED }))]));
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::new().fg(color)),
+                        Span::styled(format!("{icon} {label}"), Style::new().fg(color)),
+                    ]));
                 }
             }
             _ => {}
@@ -219,7 +247,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
     if lines.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  ◆  enter:send · y/n:tool · /exit\n", Style::new().fg(DIM)),
+            Span::styled("  ◆  enter:send · y/n:tool · /exit", Style::new().fg(DIM)),
         ]));
     } else if app.busy
         && app.msgs.last().map(|m| m.role.as_str() == "user").unwrap_or(false)
