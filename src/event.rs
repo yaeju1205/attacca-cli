@@ -48,7 +48,7 @@ pub async fn run(app: &mut App) {
     load_initial_data(app).await;
     app.add_msg(
         "sys",
-        "── attacca ── enter:send  tab:autocomplete  y/n:tool  read/find/grep auto ──",
+        "── attacca ── enter:send  alt+enter:newline  tab:autocomplete  y/n:tool ──",
     );
 
     // ── Main loop ──
