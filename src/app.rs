@@ -151,7 +151,6 @@ impl App {
                             && !self.handle_key(k.code) { break; }
                     }
                     Ok(Event::Mouse(m)) => {
-                        let max_vis = 12usize;
                         match m.kind {
                             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                                 // columns 0-27 = sidebar, 28+ = chat
@@ -168,15 +167,22 @@ impl App {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
-                                if self.sidebar_scroll + max_vis < self.sidebar_items.len() {
-                                    self.sidebar_scroll += 3;
-                                    let max = self.sidebar_items.len().saturating_sub(1);
-                                    if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
-                                    if self.sel > max { self.sel = max; }
+                                self.sidebar_scroll = self.sidebar_scroll.saturating_add(1)
+                                    .min(self.sidebar_items.len().saturating_sub(1));
+                                // keep sel in view
+                                if self.sel < self.sidebar_scroll {
+                                    self.sel = self.sidebar_scroll;
+                                }
+                                let max_vis = (12usize).min(self.sidebar_items.len());
+                                if self.sel >= self.sidebar_scroll + max_vis {
+                                    self.sel = self.sidebar_scroll + max_vis - 1;
                                 }
                             }
                             MouseEventKind::ScrollUp => {
-                                self.sidebar_scroll = self.sidebar_scroll.saturating_sub(3);
+                                self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+                                if self.sel >= self.sidebar_scroll + 12 {
+                                    self.sel = self.sidebar_scroll + 11;
+                                }
                             }
                             _ => {}
                         }
