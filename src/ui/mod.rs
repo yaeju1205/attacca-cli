@@ -21,17 +21,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new("").style(Style::new().bg(BG)), a);
 
-    // Input area height: one line per \n-segment (max 6), no word-wrap.
-    let n_lines = app.input.split('\n').count().max(1).min(6) as u16;
-    let input_total = n_lines + 1; // +1 for separator
-
+    // Input box: fixed 3 lines (1 separator + 2 content lines).
+    // Long text wraps within the box instead of expanding the layout.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),           // status bar
-            Constraint::Min(3),              // main content
-            Constraint::Length(1),           // info bar
-            Constraint::Length(input_total), // input area
+            Constraint::Length(1),    // status bar
+            Constraint::Min(3),       // main content (chat + sidebar)
+            Constraint::Length(1),    // info bar
+            Constraint::Length(3),    // input area: separator + 2 content
         ])
         .split(a);
 
@@ -73,7 +71,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mut line = vec![
         Span::styled(" ◆ ", Style::new().fg(P).add_modifier(Modifier::BOLD)),
         Span::styled("Attacca", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
-        Span::styled(" ┃ ", Style::new().fg(BORDER)),
+        Span::styled(" ", Style::new().fg(BORDER)),
         Span::styled(status, Style::new().fg(status_color).add_modifier(Modifier::BOLD)),
         mode,
     ];
@@ -197,7 +195,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  ↑↓·enter  ", hint_s),
+            Span::styled("  arrows enter  ", hint_s),
             Span::styled("+new", Style::new().fg(GREEN).add_modifier(Modifier::BOLD).bg(POPOVER)),
         ]))
         .style(Style::new().bg(POPOVER)),
@@ -273,12 +271,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(YELLOW).add_modifier(Modifier::DIM),
                 )]));
             }
-            "tool" => {} // approved/skipped — don't re-show
+            "tool" => {}
             "result" => {
                 if let Some(first) = m.text.lines().next() {
                     let ok = !m.text.starts_with("err") && !m.text.starts_with("skipped");
                     let (icon, color) = if ok { ("✔", GREEN) } else { ("✘", DESTRUCTIVE) };
-                    let label: String = first.chars().take(60).collect();
+                    let label: String = first.chars().take(58).collect();
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {icon} {label}"), Style::new().fg(color)),
                     ]));
@@ -291,10 +289,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     if lines.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", Style::new().fg(P)),
-            Span::styled(
-                "type something —  enter:send  y/n:tool  /exit",
-                Style::new().fg(DIM),
-            ),
+            Span::styled("type something —  enter:send  /help", Style::new().fg(DIM)),
         ]));
     } else if app.busy()
         && app
@@ -334,13 +329,13 @@ fn draw_info_bar(f: &mut Frame, app: &App, area: Rect) {
 
     if !app.current_project_name.is_empty() {
         spans.push(Span::styled(
-            format!(" 📁{}", app.current_project_name),
+            format!(" proj:{}", app.current_project_name),
             Style::new().fg(GREEN),
         ));
     }
     if !app.user_credits.is_empty() {
         spans.push(Span::styled(
-            format!(" 💰{}", app.user_credits),
+            format!(" credits:{}", app.user_credits),
             Style::new().fg(P_DIM),
         ));
     }
@@ -352,25 +347,22 @@ fn draw_info_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     if !app.usage_context_tokens.is_empty() {
         spans.push(Span::styled(
-            format!(" 📐{}", app.usage_context_tokens),
+            format!(" ctx:{}", app.usage_context_tokens),
             Style::new().fg(P),
         ));
     }
     if !app.usage_total_tokens.is_empty() {
         let label = if !app.usage_input_tokens.is_empty() && !app.usage_output_tokens.is_empty()
         {
-            format!(
-                " 🔤 {}/{}",
-                app.usage_input_tokens, app.usage_output_tokens
-            )
+            format!(" tokens: {}/{}", app.usage_input_tokens, app.usage_output_tokens)
         } else {
-            format!(" 🔤 {}", app.usage_total_tokens)
+            format!(" tokens:{}", app.usage_total_tokens)
         };
         spans.push(Span::styled(label, Style::new().fg(DIM)));
     }
     if !app.usage_model.is_empty() {
         spans.push(Span::styled(
-            format!(" ◆{}", app.usage_model),
+            format!(" model:{}", app.usage_model),
             Style::new().fg(DIM),
         ));
     }
@@ -407,7 +399,6 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         area.height.saturating_sub(1),
     );
 
-    // Build prompt prefix
     let prompt = if app.busy() {
         Span::styled(" ◉ ", Style::new().fg(P))
     } else if chat_focused {
@@ -426,46 +417,51 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Split input on actual newlines for multi-line display
+    // Show only the last 2 segments of input (separated by \n from Shift+Enter).
+    // More lines get a "..." indicator. Long lines wrap within the box.
     let segments: Vec<&str> = app.input.split('\n').collect();
+    let total = segments.len();
+    let show_from = total.saturating_sub(2);
 
-    // Build display lines — one ratatui Line per input line
     let mut display: Vec<Line> = Vec::new();
-    let last = segments.len().saturating_sub(1);
 
     if app.input.is_empty() {
-        // Placeholder when empty
         display.push(Line::from(vec![
             prompt,
             Span::styled("type a message…", Style::new().fg(DIM)),
             Span::styled("█", Style::new().fg(P)),
         ]));
     } else {
-        for (i, seg) in segments.iter().enumerate() {
-            let is_last = i == last;
-            if i == 0 {
-                // First line: >  content█
-                let mut spans = vec![prompt.clone(), Span::raw(seg.to_string())];
-                if is_last {
-                    spans.push(Span::styled("█", Style::new().fg(P)));
-                }
-                display.push(Line::from(spans));
+        if show_from > 0 {
+            display.push(Line::from(vec![
+                Span::styled("   ", Style::new().fg(DIM)),
+                Span::styled("...", Style::new().fg(DIM)),
+            ]));
+        }
+        for i in show_from..total {
+            let seg = segments[i];
+            let is_last = i == total - 1;
+            let cursor_ch = if is_last { "█" } else { "" };
+            if i == 0 && show_from == 0 {
+                display.push(Line::from(vec![
+                    prompt.clone(),
+                    Span::raw(seg.to_string()),
+                    Span::styled(cursor_ch, Style::new().fg(P)),
+                ]));
             } else {
-                // Continuation:    content█
-                let mut spans = vec![
+                display.push(Line::from(vec![
                     Span::styled("   ", Style::new().fg(DIM)),
                     Span::raw(seg.to_string()),
-                ];
-                if is_last {
-                    spans.push(Span::styled("█", Style::new().fg(P)));
-                }
-                display.push(Line::from(spans));
+                    Span::styled(cursor_ch, Style::new().fg(P)),
+                ]));
             }
         }
     }
 
     f.render_widget(
-        Paragraph::new(Text::from(display)).style(Style::new().bg(BG)),
+        Paragraph::new(Text::from(display))
+            .wrap(Wrap { trim: false })
+            .style(Style::new().bg(BG)),
         text_area,
     );
 
@@ -517,7 +513,7 @@ fn short(s: &str) -> String {
 fn short_name(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n > max {
-        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+        format!("{}..", s.chars().take(max.saturating_sub(2)).collect::<String>())
     } else {
         s.to_string()
     }
