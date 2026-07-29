@@ -431,7 +431,8 @@ impl App {
                         "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                         _ => {}
                     }
-                    self.add("user", &m);
+                    // user message is added by send_async bg task after POST succeeds
+                    // self.add("user", &m); not called here — avoids race
                     if self.api.key.is_empty() {
                         self.add("sys", "no API key — set ATTACCA_API_KEY");
                         return true;
@@ -618,14 +619,20 @@ impl App {
 
             // 2. Send message
             let payload = if is_first {
-                format!("{PROTOCOL}\n\n---\n{user_msg}")
+                format!("{PROTOCOL}\n\n---\n{}", &user_msg)
             } else {
-                user_msg
+                user_msg.clone()
             };
 
             if let Err(_) = api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
                 let _ = tx.send(BgEvent::Done); return;
             }
+
+            // 2b. Confirm user message in chat — clone() here because user_msg still owned
+            let _ = tx.send(BgEvent::NewMsgs {
+                msgs: vec![Msg { role: "user".into(), text: user_msg.clone(), raw: None, done: false }],
+                new_cur: 0,
+            });
 
             // 3. Poll loop — deliver messages incrementally
             let mut last_cursor = 0i64;
