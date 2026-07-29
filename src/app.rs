@@ -12,8 +12,6 @@ use std::io;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-const SLASH_COMMANDS: &[&str] = &["/exit", "/help", "/sessions", "/new"];
-
 #[derive(Clone)]
 pub struct Msg {
     pub role: String,
@@ -56,11 +54,17 @@ pub struct App {
     expanded_projects: std::collections::HashSet<String>,
     project_names: HashMap<String, String>,
     exit_requested: bool,
-    tab_candidate: Option<usize>,
+    pub focus: Focus, // which pane is focused
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
     actions: Vec<Action>,
+}
+
+#[derive(PartialEq)]
+pub enum Focus {
+    Chat,
+    Sidebar,
 }
 
 impl App {
@@ -73,7 +77,7 @@ impl App {
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
             exit_requested: false,
-            tab_candidate: None,
+            focus: Focus::Chat,
             bg_tx: tx, bg_rx: rx, actions: vec![],
         }
     }
@@ -146,11 +150,17 @@ impl App {
                         let max_vis = 12usize;
                         match m.kind {
                             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                let list_row = m.row.saturating_sub(2) as usize;
-                                let idx = list_row + self.sidebar_scroll;
-                                if idx < self.sidebar_items.len() {
-                                    self.sel = idx;
-                                    self.activate_sidebar_selection();
+                                // columns 0-27 = sidebar, 28+ = chat
+                                if m.column < 30 {
+                                    self.focus = Focus::Sidebar;
+                                    let list_row = m.row.saturating_sub(2) as usize;
+                                    let idx = list_row + self.sidebar_scroll;
+                                    if idx < self.sidebar_items.len() {
+                                        self.sel = idx;
+                                        self.activate_sidebar_selection();
+                                    }
+                                } else {
+                                    self.focus = Focus::Chat;
                                 }
                             }
                             MouseEventKind::ScrollDown => {
@@ -232,6 +242,57 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
+        // Tab always toggles focus
+        if code == KeyCode::Tab {
+            self.focus = match self.focus {
+                Focus::Chat => Focus::Sidebar,
+                Focus::Sidebar => Focus::Chat,
+            };
+            return true;
+        }
+
+        match self.focus {
+            Focus::Sidebar => self.handle_sidebar_key(code),
+            Focus::Chat => self.handle_chat_key(code),
+        }
+    }
+
+    fn handle_sidebar_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Up => {
+                if self.sel > 0 { self.sel -= 1; }
+                return true;
+            }
+            KeyCode::Down => {
+                let max = self.sidebar_items.len().saturating_sub(1);
+                if self.sel < max { self.sel += 1; }
+                return true;
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                if self.sel < self.sidebar_items.len() {
+                    self.activate_sidebar_selection();
+                }
+                return true;
+            }
+            KeyCode::Left => {
+                for i in (0..self.sel).rev() {
+                    if matches!(&self.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
+                        if let SidebarItem::ProjectHeader { id, .. } = &self.sidebar_items[i].clone() {
+                            self.expanded_projects.remove(id);
+                            self.rebuild_sidebar();
+                            self.sel = i;
+                        }
+                        break;
+                    }
+                }
+                return true;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_chat_key(&mut self, code: KeyCode) -> bool {
         // Project header expand/collapse with Enter/Right (any context)
         if let KeyCode::Enter | KeyCode::Right = code {
             if self.sel < self.sidebar_items.len()
@@ -283,9 +344,6 @@ impl App {
 
         // ── Input ──
         match code {
-            KeyCode::Tab => {
-                self.tab_autocomplete();
-            }
             KeyCode::Enter => {
                 let m = self.input.trim().to_string();
                 if !m.is_empty() {
@@ -294,14 +352,12 @@ impl App {
                         if let SidebarItem::Session { title, id, .. } = item {
                             if title == &m {
                                 self.input.clear();
-                                self.tab_candidate = None;
                                 self.actions.push(Action::Open(id.clone()));
                                 return true;
                             }
                         }
                     }
                     self.input.clear();
-                    self.tab_candidate = None;
                     match m.as_str() {
                         "/exit" | "/quit" => { self.exit_requested = true; return true; }
                         "/help" | "/h" => { self.add("sys", "enter:send  tab:autocomplete  y/n:tool  ↑↓:scroll"); return true; }
@@ -321,46 +377,13 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false),
             KeyCode::Char(c) => {
                 self.input.push(c);
-                self.tab_candidate = None;
             }
             KeyCode::Backspace => {
                 self.input.pop();
-                self.tab_candidate = None;
             }
             _ => {}
         }
         true
-    }
-
-    fn tab_autocomplete(&mut self) {
-        let trimmed = self.input.trim_start();
-        if !trimmed.starts_with('/') {
-            // not a command — insert tab character
-            self.input.push('\t');
-            return;
-        }
-        // find matching commands
-        let matching: Vec<&str> = SLASH_COMMANDS.iter()
-            .filter(|cmd| cmd.starts_with(trimmed))
-            .copied()
-            .collect();
-        if matching.is_empty() { return; }
-        if matching.len() == 1 {
-            self.input = matching[0].to_string();
-            self.input.push(' '); // space after completing
-            self.tab_candidate = None;
-            return;
-        }
-        // cycle through
-        let idx = self.tab_candidate.unwrap_or(usize::MAX);
-        let next = if idx >= matching.len() { 0 } else { idx + 1 };
-        if next >= matching.len() {
-            self.input = trimmed.to_string();
-            self.tab_candidate = None;
-        } else {
-            self.input = matching[next].to_string();
-            self.tab_candidate = Some(next);
-        }
     }
 
     fn activate_sidebar_selection(&mut self) {

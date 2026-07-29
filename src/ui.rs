@@ -68,17 +68,19 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new("").style(Style::new().bg(SURFACE)), area);
 
-    // purple accent line
+    // purple accent line — brighter when focused
+    let accent_border_color = if app.focus == crate::app::Focus::Sidebar { ACCENT } else { ACCENT_DIM };
     f.render_widget(
-        Paragraph::new("").style(Style::new().bg(ACCENT)),
+        Paragraph::new("").style(Style::new().bg(accent_border_color)),
         Rect::new(area.x, area.y + 1, 2, area.height.saturating_sub(3)),
     );
 
     // header
+    let header_fg = if app.focus == crate::app::Focus::Sidebar { ACCENT } else { DIM };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ◆ ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD).bg(SURFACE)),
-            Span::styled("sessions", Style::new().fg(TEXT).add_modifier(Modifier::BOLD).bg(SURFACE)),
+            Span::styled(" ◆ ", Style::new().fg(header_fg).add_modifier(Modifier::BOLD).bg(SURFACE)),
+            Span::styled("sessions", Style::new().fg(if app.focus == crate::app::Focus::Sidebar { TEXT } else { DIM }).add_modifier(Modifier::BOLD).bg(SURFACE)),
         ])).style(Style::new().bg(SURFACE)),
         Rect::new(area.x + 3, area.y, area.width, 1),
     );
@@ -138,9 +140,15 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         list_area,
     );
 
+    // focus indicator
+    let hint_style = if app.focus == crate::app::Focus::Sidebar {
+        Style::new().fg(ACCENT).bg(SURFACE)
+    } else {
+        Style::new().fg(DIM).bg(SURFACE)
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  ↑↓ scroll · enter open", Style::new().fg(DIM).bg(SURFACE)),
+            Span::styled("  ↑↓ enter · tab:chat", hint_style),
         ])).style(Style::new().bg(SURFACE)),
         Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
     );
@@ -235,7 +243,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-// ── Input Bar (opencode-style: clean, no border box) ──
+// ── Input Bar ──
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     // thin separator line
@@ -246,13 +254,19 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Rect::new(area.x, area.y, area.width, 1),
     );
 
+    let chat_focused = app.focus == crate::app::Focus::Chat;
+
     let prompt = if app.busy {
         Span::styled(" ◉ ", Style::new().fg(ACCENT))
+    } else if chat_focused {
+        Span::styled(" > ", Style::new().fg(ACCENT))
     } else {
-        Span::styled(" > ", Style::new().fg(ACCENT_DIM))
+        Span::styled("   ", Style::new().fg(DIM))
     };
 
-    let content: Vec<Span> = if app.busy && app.input.is_empty() {
+    let content: Vec<Span> = if !chat_focused {
+        vec![Span::styled("tab to focus chat", Style::new().fg(DIM))]
+    } else if app.busy && app.input.is_empty() {
         vec![prompt, Span::styled("waiting…", Style::new().fg(DIM))]
     } else if app.input.is_empty() {
         vec![prompt, Span::styled("type a message…", Style::new().fg(DIM))]
