@@ -335,7 +335,9 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
 
     let segments: Vec<&str> = app.input.split('\n').collect();
     let total = segments.len();
-    let show_from = total.saturating_sub(4);
+    let show_from = total.saturating_sub(3); // 3 input lines + "..." line = 4 lines fills content area
+    // When input exceeds 3 lines, show last 3 lines with "..." above.
+    // The cursor line (last) is always visible — scroll follows automatically.
 
     let mut display: Vec<Line> = Vec::new();
 
