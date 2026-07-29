@@ -101,10 +101,18 @@ impl App {
                     BgEvent::NewMsgs { msgs, new_cur } => {
                         self.cur = new_cur;
                         for m in msgs {
-                            if m.role == "assistant" {
-                                let (clean, tools) = parse_tools(&m.text);
-                                if !clean.is_empty() { self.add("agent", &clean); }
-                                for j in tools { self.add_tool(&j); }
+                            match m.role.as_str() {
+                                "assistant" => {
+                                    let (clean, tools) = parse_tools(&m.text);
+                                    if !clean.is_empty() { self.add("agent", &clean); }
+                                    for j in tools { self.add_tool(&j); }
+                                }
+                                "user" => {
+                                    if !m.text.is_empty() { self.add("user", &m.text); }
+                                }
+                                _ => {
+                                    if !m.text.is_empty() { self.add("sys", &m.text); }
+                                }
                             }
                         }
                     }
@@ -380,22 +388,36 @@ impl App {
         self.first = false;
         self.msgs.clear();
         self.scroll = 0;
-        if let Ok(body) = self.api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
-            if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                for m in msgs.iter().rev() {
-                    if let Some(c) = m["cursor"].as_i64() { if c > self.cur { self.cur = c; } }
-                    let role = m["role"].as_str().unwrap_or("");
-                    let text = m["text"].as_str().unwrap_or("");
-                    if role == "assistant" || role == "user" {
-                        let (clean, _) = parse_tools(text);
-                        if !clean.is_empty() { self.add(role, &clean); }
+        self.add("sys", &format!("loading {}", short(sid)));
+        self.rebuild_sidebar();
+
+        // fetch messages in bg
+        let api = self.api.clone();
+        let tx = self.bg_tx.clone();
+        let s = sid.to_string();
+        tokio::spawn(async move {
+            let mut new_cur = 0i64;
+            let mut new_msgs = Vec::new();
+            if let Ok(body) = api.get(&format!("/v1/sessions/{s}/messages?after=0")).await {
+                if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
+                    for m in msgs.iter().rev() {
+                        if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
+                        let role = m["role"].as_str().unwrap_or("");
+                        let text = m["text"].as_str().unwrap_or("");
+                        if role == "assistant" || role == "user" {
+                            let (clean, _) = parse_tools(text);
+                            if !clean.is_empty() {
+                                new_msgs.push(Msg { role: role.into(), text: clean, raw: None, done: false });
+                            }
+                        }
                     }
                 }
             }
-        }
-        self.add("sys", &format!("opened {}", short(sid)));
-        self.rebuild_sidebar();
-        self.busy = false;
+            if !new_msgs.is_empty() {
+                let _ = tx.send(BgEvent::NewMsgs { msgs: new_msgs, new_cur });
+            }
+            let _ = tx.send(BgEvent::Done);
+        });
     }
 
     async fn create_async(&mut self) {
