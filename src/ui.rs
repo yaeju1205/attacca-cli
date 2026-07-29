@@ -41,7 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new("").style(Style::new().bg(BG)), a);
 
     let chunks = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(2)])
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1), Constraint::Length(2)])
         .split(a);
 
     draw_status(f, app, chunks[0]);
@@ -50,7 +50,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(chunks[1]);
     draw_sidebar(f, app, main[0]);
     draw_chat(f, app, main[1]);
-    draw_box(f, app, chunks[2]);
+    draw_info_bar(f, app, chunks[2]);
+    draw_box(f, app, chunks[3]);
 }
 
 // ───── Status ─────
@@ -68,20 +69,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
     // build right-side info
     let mut right = Vec::new();
-    if !app.user_plan.is_empty() {
-        right.push(Span::styled(format!("  {}", app.user_plan), Style::new().fg(DIM)));
-    }
-    if !app.user_credits.is_empty() {
-        right.push(Span::styled(format!("  {}", app.user_credits), Style::new().fg(P_DIM)));
-    }
-    if !app.current_project_name.is_empty() {
-        right.push(Span::styled(format!("  📁{}", app.current_project_name), Style::new().fg(GREEN)));
-    }
-    if !app.usage_context_tokens.is_empty() {
-        right.push(Span::styled(format!("  📐{}", app.usage_context_tokens), Style::new().fg(YELLOW)));
-    }
-    if !app.usage_credits_used.is_empty() {
-        right.push(Span::styled(format!("  💰{}", app.usage_credits_used), Style::new().fg(P_DIM)));
+    if !app.user_name.is_empty() {
+        right.push(Span::styled(format!("  {}", app.user_name), Style::new().fg(TEXT)));
     }
     if !sid.is_empty() {
         right.push(Span::styled(format!("  {}", sid), Style::new().fg(DIM)));
@@ -303,6 +292,54 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(
         Paragraph::new(Text::from(lines)).scroll((off as u16, 0)).style(Style::new().bg(BG)),
+        area,
+    );
+}
+
+// ───── Real-time info bar ─────
+
+fn draw_info_bar(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Project
+    if !app.current_project_name.is_empty() {
+        spans.push(Span::styled(format!(" 📁{}", app.current_project_name), Style::new().fg(GREEN)));
+    }
+
+    // Credits info
+    if !app.user_credits.is_empty() {
+        spans.push(Span::styled(format!(" 💰{}", app.user_credits), Style::new().fg(P_DIM)));
+    }
+    if !app.usage_credits_used.is_empty() {
+        spans.push(Span::styled(format!(" used:{}", app.usage_credits_used), Style::new().fg(YELLOW)));
+    }
+
+    // Context tokens
+    if !app.usage_context_tokens.is_empty() {
+        spans.push(Span::styled(format!(" 📐{}", app.usage_context_tokens), Style::new().fg(P)));
+    }
+
+    // Token usage
+    if !app.usage_total_tokens.is_empty() {
+        let label = if !app.usage_input_tokens.is_empty() && !app.usage_output_tokens.is_empty() {
+            format!(" 🔤 {}/{}", app.usage_input_tokens, app.usage_output_tokens)
+        } else {
+            format!(" 🔤 {}", app.usage_total_tokens)
+        };
+        spans.push(Span::styled(label, Style::new().fg(DIM)));
+    }
+
+    // Model
+    if !app.usage_model.is_empty() {
+        spans.push(Span::styled(format!(" ◆{}", app.usage_model), Style::new().fg(DIM)));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled("  no session", Style::new().fg(DIM)));
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(CARD)),
         area,
     );
 }

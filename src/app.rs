@@ -158,7 +158,21 @@ impl App {
                             }
                         }
                     }
-                    BgEvent::Done => { self.busy_count = self.busy_count.saturating_sub(1); }
+                    BgEvent::Done => {
+                        self.busy_count = self.busy_count.saturating_sub(1);
+                        // Auto-refresh usage info after a message exchange completes
+                        if self.busy_count == 0 && self.sid.is_some() {
+                            let api = self.api.clone();
+                            let tx = self.bg_tx.clone();
+                            let sid = self.sid.clone().unwrap();
+                            tokio::spawn(async move {
+                                let v = api.get_session_usage(&sid).await;
+                                if !v.is_null() {
+                                    let _ = tx.send(BgEvent::Usage(v));
+                                }
+                            });
+                        }
+                    }
                     BgEvent::SessionCreated(sid) => {
                         if self.sid.is_none() {
                             self.sid = Some(sid);
@@ -905,72 +919,80 @@ impl App {
         }
     }
 
-    pub async fn load_session_usage_async(&mut self) {
-        let Some(ref sid) = self.sid.clone() else { return };
-        if self.api.key.is_empty() { return; }
+    async fn show_info_async(&mut self) {
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
-        let s = sid.clone();
+        let sid = self.sid.clone();
+        let project_names = self.project_names.clone();
+        let sessions = self.sessions.clone();
+
         tokio::spawn(async move {
-            let v = api.get_session_usage(&s).await;
-            if !v.is_null() {
-                let _ = tx.send(BgEvent::Usage(v));
+            // Fetch me info and session usage in parallel
+            let (me, usage) = tokio::join!(
+                api.whoami_detailed(),
+                async {
+                    if let Some(ref s) = sid { api.get_session_usage(s).await } else { Value::Null }
+                }
+            );
+
+            let mut msgs = Vec::new();
+
+            // Parse /me response: name|email|plan|credits
+            let parts: Vec<&str> = me.split('|').collect();
+            let name = parts.first().filter(|s| !s.is_empty()).map(|s| s.to_string()).unwrap_or("not logged in".into());
+            let plan = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+            let credits = parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string());
+
+            msgs.push(Msg { role: "sys".into(), text: "── Account ───────────────────────────".into(), raw: None, done: true, cursor: 0 });
+            msgs.push(Msg { role: "sys".into(), text: format!("  User:     {}", name), raw: None, done: true, cursor: 0 });
+            if let Some(p) = plan { msgs.push(Msg { role: "sys".into(), text: format!("  Plan:     {}", p), raw: None, done: true, cursor: 0 }); }
+            if let Some(c) = credits { msgs.push(Msg { role: "sys".into(), text: format!("  Credits:  {}", c), raw: None, done: true, cursor: 0 }); }
+
+            // Show used credits if available
+            if !usage.is_null() {
+                let used = field_val(&usage["credits_used"]);
+                if !used.is_empty() {
+                    msgs.push(Msg { role: "sys".into(), text: format!("  Used:     {}", used), raw: None, done: true, cursor: 0 });
+                }
             }
+
+            // Session details
+            if let Some(ref s) = sid {
+                let project_name = sessions.iter()
+                    .find(|(_, _, id)| id == s)
+                    .and_then(|(pid, _, _)| {
+                        if pid.is_empty() { None }
+                        else { Some(project_names.get(pid).cloned().unwrap_or_else(|| short(pid))) }
+                    }).unwrap_or_default();
+
+                if !project_name.is_empty() || !usage.is_null() {
+                    msgs.push(Msg { role: "sys".into(), text: String::new(), raw: None, done: true, cursor: 0 });
+                    msgs.push(Msg { role: "sys".into(), text: format!("── Session ({}) ─────────────", short(s)), raw: None, done: true, cursor: 0 });
+                    if !project_name.is_empty() {
+                        msgs.push(Msg { role: "sys".into(), text: format!("  Project:  {}", project_name), raw: None, done: true, cursor: 0 });
+                    }
+                    if !usage.is_null() {
+                        let v = |k: &str| field_val(&usage[k]);
+                        let model = v("model");
+                        if !model.is_empty() { msgs.push(Msg { role: "sys".into(), text: format!("  Model:    {}", model), raw: None, done: true, cursor: 0 }); }
+                        let ctx = v("context_tokens");
+                        if !ctx.is_empty() { msgs.push(Msg { role: "sys".into(), text: format!("  Context:  {}", ctx), raw: None, done: true, cursor: 0 }); }
+                        let inp = v("input_tokens");
+                        if !inp.is_empty() { msgs.push(Msg { role: "sys".into(), text: format!("  Input:    {}", inp), raw: None, done: true, cursor: 0 }); }
+                        let out = v("output_tokens");
+                        if !out.is_empty() { msgs.push(Msg { role: "sys".into(), text: format!("  Output:   {}", out), raw: None, done: true, cursor: 0 }); }
+                        let tot = v("total_tokens");
+                        if !tot.is_empty() { msgs.push(Msg { role: "sys".into(), text: format!("  Total:    {}", tot), raw: None, done: true, cursor: 0 }); }
+                    }
+                }
+            }
+
+            let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur: 0 });
+            if !usage.is_null() {
+                let _ = tx.send(BgEvent::Usage(usage));
+            }
+            let _ = tx.send(BgEvent::Done);
         });
-    }
-
-    async fn show_info_async(&mut self) {
-        self.load_user_info().await;
-        self.load_session_usage_async().await;
-        let plan = if self.user_plan.is_empty() { "—".to_string() } else { self.user_plan.clone() };
-        let credits = if self.user_credits.is_empty() { "—".to_string() } else { self.user_credits.clone() };
-        let name = if self.user_name.is_empty() { "not logged in".to_string() } else { self.user_name.clone() };
-        let usage_credits_used = self.usage_credits_used.clone();
-        let usage_model = self.usage_model.clone();
-        let usage_context_tokens = self.usage_context_tokens.clone();
-        let usage_input_tokens = self.usage_input_tokens.clone();
-        let usage_output_tokens = self.usage_output_tokens.clone();
-        let usage_total_tokens = self.usage_total_tokens.clone();
-
-        // get project name for current session
-        let project_name = if !self.current_project_name.is_empty() {
-            self.current_project_name.clone()
-        } else {
-            self.sid.as_ref().and_then(|sid| {
-                self.sessions.iter().find(|(_, _, id)| id == sid).map(|(pid, _, _)| {
-                    self.project_names.get(pid).cloned().unwrap_or_else(|| short(pid))
-                })
-            }).unwrap_or_default()
-        };
-
-        self.add("sys", "── Account ───────────────────────────");
-        self.add("sys", &format!("  User:     {}", name));
-        self.add("sys", &format!("  Plan:     {}", plan));
-        self.add("sys", &format!("  Credits:  {}", credits));
-        if !usage_credits_used.is_empty() {
-            self.add("sys", &format!("  Used:     {}", usage_credits_used));
-        }
-        if !project_name.is_empty() {
-            self.add("sys", "");
-            self.add("sys", &format!("── Session ({}) ─────────────", short(self.sid.as_deref().unwrap_or("?"))));
-            self.add("sys", &format!("  Project:  {}", project_name));
-            if !usage_model.is_empty() {
-                self.add("sys", &format!("  Model:    {}", usage_model));
-            }
-            if !usage_context_tokens.is_empty() {
-                self.add("sys", &format!("  Context:  {}", usage_context_tokens));
-            }
-            if !usage_input_tokens.is_empty() {
-                self.add("sys", &format!("  Input:    {}", usage_input_tokens));
-            }
-            if !usage_output_tokens.is_empty() {
-                self.add("sys", &format!("  Output:   {}", usage_output_tokens));
-            }
-            if !usage_total_tokens.is_empty() {
-                self.add("sys", &format!("  Total:    {}", usage_total_tokens));
-            }
-        }
-        self.busy_count = self.busy_count.saturating_sub(1);
     }
 }
 
