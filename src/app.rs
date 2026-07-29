@@ -510,6 +510,10 @@ impl App {
                             self.actions.push(Action::ShowInfo);
                             return true;
                         }
+                        "/sessions" => {
+                            self.focus = Focus::Sidebar;
+                            return true;
+                        }
                         "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                         _ => {}
                     }
@@ -729,13 +733,15 @@ impl App {
             let mut last_cursor = 0i64;
             loop {
                 // fetch new messages since last check
-                if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
+                // Use after=0 so we always get ALL messages and detect in-place updates.
+                // upsert_msg in the main loop handles dedup and streaming updates by cursor.
+                if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
                     if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                         if !raw_msgs.is_empty() {
                             let mut new_msgs = Vec::new();
                             let mut max_cursor = last_cursor;
                             for m in &raw_msgs {
-                                if let Some(c) = m["cursor"].as_i64() { max_cursor = max_cursor.max(c); }
+                                if let Some(c) = m["cursor"].as_i64() { if c > max_cursor { max_cursor = c; } }
                                 if m["role"].as_str() == Some("assistant") {
                                     if let Some(text) = m["text"].as_str() {
                                         let cursor = m["cursor"].as_i64().unwrap_or(0);
@@ -762,11 +768,11 @@ impl App {
                 };
 
                 if done { break; }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
-            // 4. One final fetch to catch anything after the last poll
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
+            // 4. One final fetch — after=0 to catch any last updates
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                     if !raw_msgs.is_empty() {
                         let mut new_cur = last_cursor;
@@ -808,8 +814,8 @@ impl App {
                 &serde_json::json!({"message": format!("[tool result]\n{result}"), "timezone": "Asia/Seoul"})).await;
             let mut last_cursor = 0i64;
             loop {
-                // incrementally deliver new messages
-                if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
+                // after=0 → always see in-place text updates; upsert_msg deduplicates
+                if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
                     if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                         if !raw_msgs.is_empty() {
                             let mut msgs = Vec::new();
@@ -840,8 +846,8 @@ impl App {
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            // final fetch
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
+            // final fetch — after=0 to catch any last updates
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                     if !raw_msgs.is_empty() {
                         let mut new_cur = last_cursor;
