@@ -94,6 +94,7 @@ pub struct App {
     // Scrolling
     pub scroll: usize,
     pub at_end: bool,
+    pub input_scroll: usize,
 
     // Sidebar
     pub sidebar_items: Vec<SidebarItem>,
@@ -140,6 +141,7 @@ impl App {
             autocomplete_idx: None,
             scroll: 0,
             at_end: true,
+            input_scroll: 0,
             sidebar_items: vec![],
             sidebar_sel: 0,
             sidebar_scroll: 0,

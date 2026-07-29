@@ -365,8 +365,13 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Show at most 3 lines; scroll when input exceeds that.
-    let scroll_off = total.saturating_sub(3);
+    // Scroll: Ctrl+↑/↓ for manual, auto-follow at bottom when typing.
+    let max_scroll = total.saturating_sub(3);
+    let scroll_off = if app.input_scroll == usize::MAX || app.input_scroll > max_scroll {
+        max_scroll
+    } else {
+        app.input_scroll
+    };
 
     f.render_widget(
         Paragraph::new(Text::from(display))

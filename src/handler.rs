@@ -225,6 +225,27 @@ pub fn rebuild_sidebar(app: &mut App) {
 fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     const SCROLL_SPEED: usize = 3;
     match code {
+        // Ctrl+↑/↓: scroll input content when it exceeds 3 lines
+        KeyCode::Up if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.input_scroll == usize::MAX {
+                let total = app.input.split('\n').count();
+                app.input_scroll = total.saturating_sub(3).saturating_sub(1);
+            } else if app.input_scroll > 0 {
+                app.input_scroll -= 1;
+            }
+        }
+        KeyCode::Down if modifiers.contains(KeyModifiers::CONTROL) => {
+            let total = app.input.split('\n').count();
+            let max_scroll = total.saturating_sub(3);
+            if app.input_scroll == usize::MAX || app.input_scroll < max_scroll {
+                if app.input_scroll == usize::MAX {
+                    app.input_scroll = max_scroll;
+                } else {
+                    app.input_scroll = app.input_scroll.saturating_add(1);
+                }
+            }
+        }
+        // ↑/↓ (no modifier): scroll chat history
         KeyCode::Up => {
             if app.at_end {
                 app.at_end = false;
@@ -284,6 +305,7 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
                 || modifiers.contains(KeyModifiers::CONTROL) =>
         {
             app.input.push('\n');
+            app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
         // Ctrl+J (0x0A = LF) → newline fallback for terminals without Kitty protocol.
@@ -296,10 +318,12 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Enter => dispatch_command(app),
         KeyCode::Char(c) => {
             app.input.push(c);
+            app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
         KeyCode::Backspace => {
             app.input.pop();
+            app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
         _ => {}
@@ -317,6 +341,7 @@ fn dispatch_command(app: &mut App) {
         if let SidebarItem::Session { title, id, .. } = item {
             if title == &raw {
                 app.input.clear();
+                app.input_scroll = usize::MAX;
                 app.actions.push(Action::Open(id.clone()));
                 return;
             }
@@ -324,6 +349,7 @@ fn dispatch_command(app: &mut App) {
     }
 
     app.input.clear();
+    app.input_scroll = usize::MAX;
 
     match raw.as_str() {
         "/exit" | "/quit" => {
@@ -379,6 +405,7 @@ fn show_help(app: &mut App) {
     app.add_msg("sys", "  ↑↓         Scroll chat history");
     app.add_msg("sys", "  y/n        Approve/skip tool calls");
     app.add_msg("sys", "  Ctrl+C     Exit");
+    app.add_msg("sys", "  Ctrl+↑/↓  Scroll input");
 }
 
 // ── Autocomplete ───────────────────────────────────────────────
