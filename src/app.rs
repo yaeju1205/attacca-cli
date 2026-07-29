@@ -29,6 +29,7 @@ pub enum SidebarItem {
 
 enum BgEvent {
     NewMsgs { msgs: Vec<Msg>, new_cur: i64 },
+    SessionCreated(String),
     Done,
 }
 
@@ -126,6 +127,11 @@ impl App {
                         }
                     }
                     BgEvent::Done => { self.busy = false; }
+                    BgEvent::SessionCreated(sid) => {
+                        if self.sid.is_none() {
+                            self.sid = Some(sid);
+                        }
+                    }
                 }
             }
 
@@ -450,7 +456,7 @@ impl App {
         }
     }
 
-    // ── Async operations ──
+    // ── Async operations (all non-blocking via bg tasks) ──
 
     async fn open_async(&mut self, sid: &str) {
         self.sid = Some(sid.to_string());
@@ -462,7 +468,6 @@ impl App {
         self.add("sys", &format!("loading {}", short(sid)));
         self.rebuild_sidebar();
 
-        // fetch messages in bg
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
         let s = sid.to_string();
@@ -497,65 +502,82 @@ impl App {
         self.msgs.clear();
         self.scroll = 0;
         self.at_end = true;
-        match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
-            Ok(body) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                    if let Some(id) = v["id"].as_str() {
-                        self.sid = Some(id.to_string());
-                        self.cur = 0;
-                        self.first = true;
-                        self.add("sys", "new session");
-                        self.busy = false;
-                        return;
-                    }
-                }
-                self.add("sys", &format!("create: {body}"));
-            }
-            Err((c, b)) => {
-                self.add("sys", &format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
-            }
-        }
-        self.busy = false;
-    }
+        self.add("sys", "creating session…");
 
-    async fn send_async(&mut self, raw: String) {
-        if self.sid.is_none() {
-            match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
+        let api = self.api.clone();
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
                 Ok(body) => {
                     if let Ok(v) = serde_json::from_str::<Value>(&body) {
                         if let Some(id) = v["id"].as_str() {
-                            self.sid = Some(id.to_string());
-                            self.cur = 0;
-                            self.first = true;
-                        } else {
-                            self.add("sys", &format!("session: {body}")); self.busy = false; return;
+                            let _ = tx.send(BgEvent::SessionCreated(id.to_string()));
+                            let _ = tx.send(BgEvent::NewMsgs {
+                                msgs: vec![Msg { role: "sys".into(), text: format!("new session {}", short(id)), raw: None, done: true }],
+                                new_cur: 0,
+                            });
                         }
-                    } else { self.add("sys", "session: parse error"); self.busy = false; return; }
+                    }
                 }
                 Err((c, b)) => {
-                    self.add("sys", &format!("session: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
-                    self.busy = false; return;
+                    let _ = tx.send(BgEvent::NewMsgs {
+                        msgs: vec![Msg { role: "sys".into(), text: format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true }],
+                        new_cur: 0,
+                    });
                 }
             }
-        }
-        let Some(ref sid) = self.sid.clone() else { self.busy = false; return; };
-        let payload = if self.first {
-            self.first = false;
-            format!("{PROTOCOL}\n\n---\n{raw}")
-        } else {
-            raw
-        };
-        if let Err((c, b)) = self.api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
-            self.add("sys", &format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
-            self.busy = false; return;
-        }
+            let _ = tx.send(BgEvent::Done);
+        });
+    }
+
+    async fn send_async(&mut self, raw: String) {
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
-        let c = self.cur;
-        let s = sid.clone();
+        let user_msg = raw.clone();
+        let had_sid = self.sid.clone();
+        let cur = self.cur;
+        let is_first = self.first;
+        if is_first { self.first = false; }
+
         tokio::spawn(async move {
+            let sid = if let Some(s) = had_sid { s }
+            else {
+                match api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
+                    Ok(body) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                            if let Some(id) = v["id"].as_str() {
+                                let _ = tx.send(BgEvent::SessionCreated(id.to_string()));
+                                id.to_string()
+                            } else { let _ = tx.send(BgEvent::Done); return; }
+                        } else { let _ = tx.send(BgEvent::Done); return; }
+                    }
+                    Err((c, b)) => {
+                        let _ = tx.send(BgEvent::NewMsgs {
+                            msgs: vec![Msg { role: "sys".into(), text: format!("session: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true }],
+                            new_cur: 0,
+                        });
+                        let _ = tx.send(BgEvent::Done); return;
+                    }
+                }
+            };
+
+            let payload = if is_first {
+                format!("{PROTOCOL}\n\n---\n{user_msg}")
+            } else {
+                user_msg
+            };
+
+            if let Err((c, b)) = api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
+                let _ = tx.send(BgEvent::NewMsgs {
+                    msgs: vec![Msg { role: "sys".into(), text: format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true }],
+                    new_cur: 0,
+                });
+                let _ = tx.send(BgEvent::Done); return;
+            }
+
+            // poll
             loop {
-                match api.get(&format!("/v1/sessions/{s}")).await {
+                match api.get(&format!("/v1/sessions/{sid}")).await {
                     Ok(body) => {
                         if let Ok(v) = serde_json::from_str::<Value>(&body) {
                             if !v["running"].as_bool().unwrap_or(true) { break; }
@@ -565,12 +587,15 @@ impl App {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            if let Ok(body) = api.get(&format!("/v1/sessions/{s}/messages?after={c}")).await {
+
+            // read new msgs
+            let read_after = cur;
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={read_after}")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                    let mut new_cur = c;
+                    let mut new_cur = read_after;
                     let mut msgs = Vec::new();
                     for m in &raw_msgs {
-                        if let Some(c2) = m["cursor"].as_i64() { if c2 > new_cur { new_cur = c2; } }
+                        if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
                         if m["role"].as_str() == Some("assistant") {
                             if let Some(text) = m["text"].as_str() {
                                 msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
