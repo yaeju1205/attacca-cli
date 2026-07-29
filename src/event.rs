@@ -313,7 +313,7 @@ fn consume_events(app: &mut App) -> bool {
                         }
                         if (k.kind == crossterm::event::KeyEventKind::Press
                             || k.kind == crossterm::event::KeyEventKind::Repeat)
-                            && !handler::handle_key(app, k.code)
+                            && !handler::handle_key(app, k.code, k.modifiers)
                         {
                             app.exit_requested = true;
                             break;

@@ -21,13 +21,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new("").style(Style::new().bg(BG)), a);
 
+    // Input area height: dynamic based on line count (1 separator + 1~5 content lines)
+    let line_count = app.input.lines().count().max(1).min(5) as u16;
+    let input_total = line_count + 1; // +1 for the separator line
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),   // status bar
-            Constraint::Min(3),      // main content
-            Constraint::Length(1),   // info bar
-            Constraint::Length(2),   // input box
+            Constraint::Length(1),           // status bar
+            Constraint::Min(3),              // main content
+            Constraint::Length(1),           // info bar
+            Constraint::Length(input_total), // input area
         ])
         .split(a);
 
@@ -386,7 +390,7 @@ fn draw_info_bar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
     let chat_focused = app.focus == Focus::Chat;
 
-    // separator line
+    // separator line (top row of the input area)
     let sep_y = area.y;
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
@@ -405,27 +409,70 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("   ", Style::new().fg(DIM))
     };
 
-    let content: Vec<Span> = if !chat_focused {
-        vec![Span::styled("press Tab to focus chat", Style::new().fg(DIM))]
-    } else if app.busy() && app.input.is_empty() {
-        vec![prompt, Span::styled("waiting…", Style::new().fg(DIM))]
-    } else if app.input.is_empty() {
-        vec![
-            prompt,
-            Span::styled("type a message…", Style::new().fg(DIM)),
-        ]
-    } else {
-        vec![
-            prompt,
-            Span::raw(&app.input),
-            Span::styled("█", Style::new().fg(P)),
-        ]
-    };
+    let text_area = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(1),
+    );
 
-    let ir = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1);
+    if !chat_focused {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "press Tab to focus chat",
+                Style::new().fg(DIM),
+            )]))
+            .style(Style::new().bg(BG)),
+            text_area,
+        );
+        return;
+    }
+
+    if app.busy() && app.input.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![prompt, Span::styled("waiting…", Style::new().fg(DIM))]))
+                .style(Style::new().bg(BG)),
+            text_area,
+        );
+        return;
+    }
+
+    if app.input.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![prompt, Span::styled("type a message…", Style::new().fg(DIM))]))
+                .style(Style::new().bg(BG)),
+            text_area,
+        );
+        return;
+    }
+
+    // Multi-line input rendering
+    let input_lines: Vec<&str> = app.input.split('\n').collect();
+    let last = input_lines.len().saturating_sub(1);
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, segment) in input_lines.iter().enumerate() {
+        if i == 0 {
+            let mut spans = vec![prompt.clone(), Span::raw(segment.to_string())];
+            if i == last {
+                spans.push(Span::styled("█", Style::new().fg(P)));
+            }
+            lines.push(Line::from(spans));
+        } else {
+            let mut spans = vec![
+                Span::styled("   ", Style::new().fg(DIM)),
+                Span::raw(segment.to_string()),
+            ];
+            if i == last {
+                spans.push(Span::styled("█", Style::new().fg(P)));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
     f.render_widget(
-        Paragraph::new(Text::from(Line::from(content))).style(Style::new().bg(BG)),
-        ir,
+        Paragraph::new(Text::from(lines)).style(Style::new().bg(BG)),
+        text_area,
     );
 
     // autocomplete popup

@@ -5,11 +5,11 @@
 
 use crate::app::{Action, App, Focus, SidebarItem};
 use crate::tools::{exec_tool, short};
-use crossterm::event::{KeyCode, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use std::collections::BTreeMap;
 
 /// Process a keyboard event. Returns `false` on exit request.
-pub fn handle_key(app: &mut App, code: KeyCode) -> bool {
+pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     // y/n tool approval — intercept before focus dispatch
     if let KeyCode::Char(c) = code {
         if (c == 'y' || c == 'Y') && app.has_pending_tool() {
@@ -40,7 +40,7 @@ pub fn handle_key(app: &mut App, code: KeyCode) -> bool {
 
     match app.focus {
         Focus::Sidebar => handle_sidebar(app, code),
-        Focus::Chat => handle_chat(app, code),
+        Focus::Chat => handle_chat(app, code, modifiers),
     }
 }
 
@@ -222,7 +222,7 @@ pub fn rebuild_sidebar(app: &mut App) {
 
 // ── Chat input ─────────────────────────────────────────────────
 
-fn handle_chat(app: &mut App, code: KeyCode) -> bool {
+fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     const SCROLL_SPEED: usize = 3;
     match code {
         KeyCode::Up => {
@@ -268,6 +268,10 @@ fn handle_chat(app: &mut App, code: KeyCode) -> bool {
         KeyCode::End => {
             app.at_end = true;
             app.scroll = 0;
+        }
+        KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => {
+            app.input.push('\n');
+            update_autocomplete(app);
         }
         KeyCode::Enter => dispatch_command(app),
         KeyCode::Char(c) => {
@@ -350,6 +354,7 @@ fn show_help(app: &mut App) {
     app.add_msg("sys", "");
     app.add_msg("sys", "── Keys ─────────────────────────────");
     app.add_msg("sys", "  Enter      Send message");
+    app.add_msg("sys", "  Shift+Enter Newline in input");
     app.add_msg("sys", "  Tab        Focus sidebar / autocomplete");
     app.add_msg("sys", "  ↑↓         Scroll chat history");
     app.add_msg("sys", "  y/n        Approve/skip tool calls");
