@@ -246,26 +246,7 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        // Tab: cycle autocomplete OR toggle focus
-        if code == KeyCode::Tab {
-            if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
-                self.cycle_autocomplete();
-            } else {
-                self.focus = match self.focus {
-                    Focus::Chat => Focus::Sidebar,
-                    Focus::Sidebar => Focus::Chat,
-                };
-            }
-            return true;
-        }
-
-        match self.focus {
-            Focus::Sidebar => self.handle_sidebar_key(code),
-            Focus::Chat => self.handle_chat_key(code),
-        }
-    }
-
-    fn handle_sidebar_key(&mut self, code: KeyCode) -> bool {
+        // ── Always-active sidebar navigation ──
         match code {
             KeyCode::Up => {
                 if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); }
@@ -277,10 +258,12 @@ impl App {
                 return true;
             }
             KeyCode::Enter | KeyCode::Right => {
-                if self.sel < self.sidebar_items.len() {
+                if self.sel < self.sidebar_items.len()
+                    && matches!(&self.sidebar_items[self.sel], SidebarItem::ProjectHeader { .. })
+                {
                     self.activate_sidebar_selection();
+                    return true;
                 }
-                return true;
             }
             KeyCode::Left => {
                 for i in (0..self.sel).rev() {
@@ -295,48 +278,34 @@ impl App {
                 }
                 return true;
             }
+            KeyCode::Tab => {
+                // Tab: cycle autocomplete suggestions if any, else toggle focus
+                if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
+                    self.cycle_autocomplete();
+                } else {
+                    self.focus = match self.focus {
+                        Focus::Chat => Focus::Sidebar,
+                        Focus::Sidebar => Focus::Chat,
+                    };
+                }
+                return true;
+            }
             _ => {}
         }
-        true
-    }
 
-    fn handle_chat_key(&mut self, code: KeyCode) -> bool {
-        // Project header expand/collapse with Enter/Right (any context)
-        if let KeyCode::Enter | KeyCode::Right = code {
-            if self.sel < self.sidebar_items.len()
-                && matches!(&self.sidebar_items[self.sel], SidebarItem::ProjectHeader { .. })
-            {
-                self.activate_sidebar_selection();
-                return true;
-            }
-        }
-
-        // Left → collapse parent project
-        if let KeyCode::Left = code {
-            for i in (0..self.sel).rev() {
-                if matches!(&self.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
-                    if let SidebarItem::ProjectHeader { id, .. } = &self.sidebar_items[i].clone() {
-                        self.expanded_projects.remove(id);
-                        self.rebuild_sidebar();
-                        self.sel = i;
-                    }
-                    break;
+        // ── When sidebar is focused, Enter opens sessions (+ new, etc) ──
+        if self.focus == Focus::Sidebar {
+            if let KeyCode::Enter | KeyCode::Right = code {
+                if self.sel < self.sidebar_items.len() {
+                    self.activate_sidebar_selection();
                 }
+                return true;
             }
-            return true;
+            return true; // consume all keys when sidebar focused
         }
 
-        // ── Chat scroll ──
+        // ── Chat-only keys (scrolling, typing) ──
         match code {
-            KeyCode::Up => {
-                if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
-                else if self.scroll == usize::MAX { self.scroll = 0; }
-                return true;
-            }
-            KeyCode::Down => {
-                if self.scroll != usize::MAX { self.scroll += 1; }
-                return true;
-            }
             KeyCode::PageUp => {
                 self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 };
                 return true;
@@ -355,7 +324,6 @@ impl App {
             KeyCode::Enter => {
                 let m = self.input.trim().to_string();
                 if !m.is_empty() {
-                    // Check if typing a session title — activate it
                     for item in &self.sidebar_items {
                         if let SidebarItem::Session { title, id, .. } = item {
                             if title == &m {
@@ -368,8 +336,7 @@ impl App {
                     self.input.clear();
                     match m.as_str() {
                         "/exit" | "/quit" => { self.exit_requested = true; return true; }
-                        "/help" | "/h" => { self.add("sys", "enter:send  tab:autocomplete  y/n:tool  ↑↓:scroll"); return true; }
-                        "/sessions" | "/s" => { return true; }
+                        "/help" | "/h" => { self.add("sys", "enter:send  y/n:tool  pgup/pgdn:scroll"); return true; }
                         "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                         _ => {}
                     }
