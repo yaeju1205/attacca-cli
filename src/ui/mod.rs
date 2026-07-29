@@ -261,18 +261,22 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
+    // Keep only the last `max_rows` logical lines. Each wraps within the
+    // area width, so the bottom portion may clip slightly — that's expected
+    // terminal scroll behaviour.
     let total = lines.len();
     let max_rows = area.height.saturating_sub(1) as usize;
-
-    let scroll_off = if app.at_end || total <= max_rows {
+    let skip = if app.at_end || total <= max_rows {
         total.saturating_sub(max_rows)
     } else {
         total.saturating_sub(max_rows).saturating_sub(app.scroll)
     };
+    if skip > 0 {
+        let _ = lines.drain(..skip.min(total));
+    }
 
     f.render_widget(
         Paragraph::new(Text::from(lines))
-            .scroll((scroll_off as u16, 0))
             .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
