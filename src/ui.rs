@@ -139,9 +139,8 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         Style::new().fg(TEXT).add_modifier(Modifier::BOLD).bg(ACCENT_BG)
                     } else if hl {
                         Style::new().fg(DIM).bg(BORDER)
-                    } else if dimmed {
-                        Style::new().fg(DIM).bg(POPOVER)
                     } else {
+                        // non-active, non-highlighted — always dim
                         Style::new().fg(DIM).bg(POPOVER)
                     };
                     ListItem::new(Line::from(vec![
@@ -154,8 +153,6 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         Style::new().fg(GREEN).bg(ACCENT_BG)
                     } else if hl {
                         Style::new().fg(GREEN).bg(BORDER)
-                    } else if dimmed {
-                        Style::new().fg(DIM).bg(POPOVER)
                     } else {
                         Style::new().fg(DIM).bg(POPOVER)
                     };
