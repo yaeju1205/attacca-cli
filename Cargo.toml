@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 ratatui = "0.28"
 crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }

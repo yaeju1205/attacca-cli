@@ -31,6 +31,12 @@ enum BgEvent {
     Done,
 }
 
+enum Action {
+    Send(String),
+    Open(String),
+    Create,
+}
+
 pub struct App {
     pub api: Api,
     pub sid: Option<String>,
@@ -50,7 +56,7 @@ pub struct App {
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
-    send_queue: Vec<String>,
+    actions: Vec<Action>,
 }
 
 impl App {
@@ -62,7 +68,7 @@ impl App {
             sidebar_scroll: 0, show_sidebar: false, first: true, sessions: vec![],
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
-            bg_tx: tx, bg_rx: rx, send_queue: vec![],
+            bg_tx: tx, bg_rx: rx, actions: vec![],
         }
     }
 
@@ -82,7 +88,7 @@ impl App {
         loop {
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
 
-            // drain bg events
+            // drain bg events (poll results)
             while let Ok(ev) = self.bg_rx.try_recv() {
                 match ev {
                     BgEvent::NewMsgs { msgs, new_cur } => {
@@ -99,14 +105,19 @@ impl App {
                 }
             }
 
-            // process queue when idle
-            if !self.busy && !self.send_queue.is_empty() {
-                let msg = self.send_queue.remove(0);
+            // process one action at a time
+            if !self.busy && !self.actions.is_empty() {
+                let action = self.actions.remove(0);
                 self.busy = true;
-                self.do_send(msg);
+                match action {
+                    Action::Send(msg) => self.send_async(msg).await,
+                    Action::Open(sid) => self.open_async(&sid).await,
+                    Action::Create => self.create_async().await,
+                }
                 continue;
             }
 
+            // poll keyboard
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
@@ -172,30 +183,19 @@ impl App {
         self.sidebar_scroll = 0;
     }
 
-    fn adjust_sidebar_scroll(&mut self) {
-        // Keep selected item visible: if sel is before scroll, scroll back.
-        // If sel is past the visible window (~15 items), scroll forward.
-        let vis = 15;
-        if self.sel < self.sidebar_scroll {
-            self.sidebar_scroll = self.sel;
-        } else if self.sel >= self.sidebar_scroll + vis {
-            self.sidebar_scroll = self.sel.saturating_sub(vis).saturating_add(1);
-        }
-    }
-
-    // ── Key handling (fully sync — no block_on, no await) ──
+    // ── Key handling: only sets state and pushes actions ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
         if self.show_sidebar {
             match code {
                 KeyCode::Tab | KeyCode::Esc => { self.show_sidebar = false; return true; }
                 KeyCode::Up => {
-                    if self.sel > 0 { self.sel -= 1; self.adjust_sidebar_scroll(); }
+                    if self.sel > 0 { self.sel -= 1; }
                     return true;
                 }
                 KeyCode::Down => {
                     let max = self.sidebar_items.len().saturating_sub(1);
-                    if self.sel < max { self.sel += 1; self.adjust_sidebar_scroll(); }
+                    if self.sel < max { self.sel += 1; }
                     return true;
                 }
                 KeyCode::Enter | KeyCode::Right => {
@@ -207,12 +207,12 @@ impl App {
                                 self.rebuild_sidebar();
                             }
                             SidebarItem::Session { id, .. } => {
-                                self.open_sync(&id);
                                 self.show_sidebar = false;
+                                self.actions.push(Action::Open(id));
                             }
                             SidebarItem::NewSession => {
-                                self.create_sync();
                                 self.show_sidebar = false;
+                                self.actions.push(Action::Create);
                             }
                         }
                     }
@@ -248,7 +248,7 @@ impl App {
                             "/q" | "/quit" | "/exit" => std::process::exit(0),
                             "/h" | "/help" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); return true; }
                             "/sessions" | "/s" => { self.show_sidebar = true; return true; }
-                            "/new" | "/n" => { self.create_sync(); return true; }
+                            "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                             _ => {}
                         }
                         self.add("user", &m);
@@ -256,7 +256,7 @@ impl App {
                             self.add("sys", "no API key — set ATTACCA_API_KEY");
                             return true;
                         }
-                        self.send_queue.push(m);
+                        self.actions.push(Action::Send(m));
                     }
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true),
@@ -279,15 +279,16 @@ impl App {
         true
     }
 
-    // ── Sync operations (blocking HTTP, no bg thread needed) ──
+    // ── Async operations (run from main loop) ──
 
-    fn open_sync(&mut self, sid: &str) {
+    async fn open_async(&mut self, sid: &str) {
         self.sid = Some(sid.to_string());
         self.cur = 0;
         self.first = false;
         self.msgs.clear();
         self.scroll = 0;
-        if let Ok(body) = self.api.blocking_get(&format!("/v1/sessions/{sid}/messages?after=0")) {
+
+        if let Ok(body) = self.api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
             if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                 for m in msgs.iter().rev() {
                     if let Some(c) = m["cursor"].as_i64() { if c > self.cur { self.cur = c; } }
@@ -301,16 +302,16 @@ impl App {
             }
         }
         self.add("sys", &format!("opened {}", short(sid)));
+        self.busy = false;
     }
 
-    fn create_sync(&mut self) {
+    async fn create_async(&mut self) {
         self.sid = None;
         self.first = true;
         self.msgs.clear();
         self.scroll = 0;
-        self.busy = false;
 
-        match self.api.blocking_post("sessions", &serde_json::json!({"title": "attacca-cli"})) {
+        match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
             Ok(body) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&body) {
                     if let Some(id) = v["id"].as_str() {
@@ -318,6 +319,7 @@ impl App {
                         self.cur = 0;
                         self.first = true;
                         self.add("sys", "new session");
+                        self.busy = false;
                         return;
                     }
                 }
@@ -327,13 +329,13 @@ impl App {
                 self.add("sys", &format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
             }
         }
+        self.busy = false;
     }
 
-    // ── Send: sync session + send, bg poll ──
-
-    fn do_send(&mut self, raw: String) {
+    async fn send_async(&mut self, raw: String) {
+        // ensure session exists
         if self.sid.is_none() {
-            match self.api.blocking_post("sessions", &serde_json::json!({"title": "attacca-cli"})) {
+            match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
                 Ok(body) => {
                     if let Ok(v) = serde_json::from_str::<Value>(&body) {
                         if let Some(id) = v["id"].as_str() {
@@ -360,13 +362,13 @@ impl App {
             raw
         };
 
-        // sync send
-        if let Err((c, b)) = self.api.blocking_post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})) {
+        // send (async, fast)
+        if let Err((c, b)) = self.api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
             self.add("sys", &format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
             self.busy = false; return;
         }
 
-        // bg poll
+        // wait + read in bg task
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
         let c = self.cur;
@@ -400,8 +402,10 @@ impl App {
                     }
                 }
             }
-            let _ = tx.send(BgEvent::Done);
+            drop(tx); // close channel so next poll shows idle
         });
+        // busy stays true until bg sends Done
+        // Don't set busy=false here — bg will send Done
     }
 
     // ── Tool approval ──
@@ -415,15 +419,15 @@ impl App {
         self.add("result", &result);
         if !yes || self.sid.is_none() { return; }
         let sid = self.sid.clone().unwrap();
+        self.busy = true;
 
-        // also bg — but send result synchronously first
-        let _ = self.api.blocking_post(&format!("/v1/sessions/{sid}/messages"),
-            &serde_json::json!({"message": format!("[tool result]\n{result}"), "timezone": "Asia/Seoul"}));
-
+        // send result + poll in bg
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
         let cur = self.cur;
         tokio::spawn(async move {
+            let _ = api.post(&format!("/v1/sessions/{sid}/messages"),
+                &serde_json::json!({"message": format!("[tool result]\n{result}"), "timezone": "Asia/Seoul"})).await;
             loop {
                 match api.get(&format!("/v1/sessions/{sid}")).await {
                     Ok(body) => {
