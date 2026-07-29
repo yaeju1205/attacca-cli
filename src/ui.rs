@@ -65,8 +65,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let sid = app.sid.as_ref().map(|s| short(s)).unwrap_or_default();
-    let status = if app.busy { "running" } else { "ready" };
-    let status_color = if app.busy { YELLOW } else { GREEN };
+    let status = if app.busy() { "running" } else { "ready" };
+    let status_color = if app.busy() { YELLOW } else { GREEN };
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -258,7 +258,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  ◆ ", Style::new().fg(P)),
             Span::styled("type something —  enter:send  y/n:tool  /exit", Style::new().fg(DIM)),
         ]));
-    } else if app.busy
+    } else if app.busy()
         && app.msgs.last().map(|m| m.role.as_str() == "user").unwrap_or(false)
     {
         lines.push(Line::from(vec![
@@ -293,7 +293,7 @@ fn draw_box(f: &mut Frame, app: &App, area: Rect) {
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let prompt = if app.busy {
+    let prompt = if app.busy() {
         Span::styled(" ◉ ", Style::new().fg(P))
     } else if chat_focused {
         Span::styled(" > ", Style::new().fg(P))
@@ -303,7 +303,7 @@ fn draw_box(f: &mut Frame, app: &App, area: Rect) {
 
     let content: Vec<Span> = if !chat_focused {
         vec![Span::styled("press Tab to focus chat", Style::new().fg(DIM))]
-    } else if app.busy && app.input.is_empty() {
+    } else if app.busy() && app.input.is_empty() {
         vec![prompt, Span::styled("waiting…", Style::new().fg(DIM))]
     } else if app.input.is_empty() {
         vec![prompt, Span::styled("type a message…", Style::new().fg(DIM))]

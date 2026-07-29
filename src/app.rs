@@ -47,7 +47,6 @@ pub struct App {
     pub input: String,
     pub scroll: usize,
     pub at_end: bool,
-    pub busy: bool,
     pub sidebar_items: Vec<SidebarItem>,
     pub sel: usize,
     pub sidebar_scroll: usize,
@@ -59,6 +58,7 @@ pub struct App {
     pub focus: Focus,
     pub autocomplete_suggestions: Vec<String>,
     pub autocomplete_idx: Option<usize>,
+    busy_count: u32, // 0=ready, >0=waiting. NEVER gets stuck.
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
@@ -76,7 +76,7 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             api, sid: None, cur: 0, msgs: vec![], input: String::new(),
-            scroll: 0, at_end: true, busy: false, sidebar_items: vec![], sel: 0,
+            scroll: 0, at_end: true, busy_count: 0, sidebar_items: vec![], sel: 0,
             sidebar_scroll: 0, first: true, sessions: vec![],
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
@@ -87,6 +87,9 @@ impl App {
             bg_tx: tx, bg_rx: rx, actions: vec![],
         }
     }
+
+    /// Counter-based busy check — NEVER gets stuck.
+    pub fn busy(&self) -> bool { self.busy_count > 0 }
 
     pub async fn run(&mut self) {
         terminal::enable_raw_mode().ok();
@@ -126,7 +129,7 @@ impl App {
                             }
                         }
                     }
-                    BgEvent::Done => { self.busy = false; }
+                    BgEvent::Done => { self.busy_count = self.busy_count.saturating_sub(1); }
                     BgEvent::SessionCreated(sid) => {
                         if self.sid.is_none() {
                             self.sid = Some(sid);
@@ -136,9 +139,9 @@ impl App {
             }
 
             // drain action queue
-            while !self.busy && !self.actions.is_empty() {
+            while self.busy_count == 0 && !self.actions.is_empty() {
                 let action = self.actions.remove(0);
-                self.busy = true;
+                self.busy_count += 1;
                 match action {
                     Action::Send(msg) => self.send_async(msg).await,
                     Action::Open(sid) => self.open_async(&sid).await,
@@ -628,7 +631,7 @@ impl App {
         self.add("result", &result);
         if !yes || self.sid.is_none() { return; }
         let sid = self.sid.clone().unwrap();
-        self.busy = true;
+        self.busy_count += 1;
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
         let cur = self.cur;
