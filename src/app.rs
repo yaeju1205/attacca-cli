@@ -59,7 +59,6 @@ pub struct App {
     pub focus: Focus,
     pub autocomplete_suggestions: Vec<String>,
     pub autocomplete_idx: Option<usize>,
-    dirty: bool, // needs redraw
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
@@ -82,7 +81,6 @@ impl App {
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
             exit_requested: false,
-            dirty: true,
             focus: Focus::Chat,
             autocomplete_suggestions: vec![],
             autocomplete_idx: None,
@@ -104,18 +102,13 @@ impl App {
         self.add("sys", "attacca — enter:send  tab:autocomplete  y/n:tool  /exit");
 
         loop {
-            // draw only when dirty
-            if self.dirty {
-                let _ = term.draw(|f| ui::draw(f, self));
-                self.dirty = false;
-            }
+            if term.draw(|f| ui::draw(f, self)).is_err() { break; }
             if self.exit_requested { break; }
 
-            // drain bg events (poll results) — non-blocking
+            // drain ALL pending bg events
             while let Ok(ev) = self.bg_rx.try_recv() {
                 match ev {
                     BgEvent::NewMsgs { msgs, new_cur } => {
-                        self.dirty = true;
                         self.cur = new_cur;
                         for m in msgs {
                             match m.role.as_str() {
@@ -133,9 +126,8 @@ impl App {
                             }
                         }
                     }
-                    BgEvent::Done => { self.dirty = true; self.busy = false; }
+                    BgEvent::Done => { self.busy = false; }
                     BgEvent::SessionCreated(sid) => {
-                        self.dirty = true;
                         if self.sid.is_none() {
                             self.sid = Some(sid);
                         }
@@ -143,7 +135,7 @@ impl App {
                 }
             }
 
-            // drain action queue — don't await, just dispatch to bg
+            // drain action queue
             while !self.busy && !self.actions.is_empty() {
                 let action = self.actions.remove(0);
                 self.busy = true;
@@ -152,81 +144,77 @@ impl App {
                     Action::Open(sid) => self.open_async(&sid).await,
                     Action::Create => self.create_async().await,
                 }
-                // don't continue — let event poll happen
             }
 
-            // poll events
-            match event::poll(Duration::from_millis(30)) { // ~33 fps — instant feel, low CPU
-                Ok(true) => match event::read() {
-                    Ok(Event::Key(k)) => {
-                        if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-                            break;
-                        }
-                        if (k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat)
-                            && !self.handle_key(k.code) { break; }
-                    }
-                    Ok(Event::Mouse(m)) => {
-                        match m.kind {
-                            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                if m.column < 30 {
-                                    self.focus = Focus::Sidebar;
-                                    let list_row = m.row.saturating_sub(2) as usize;
-                                    let idx = list_row + self.sidebar_scroll;
-                                    if idx < self.sidebar_items.len() {
-                                        self.sel = idx;
-                                        self.activate_sidebar_selection();
-                                    }
-                                } else {
-                                    self.focus = Focus::Chat;
+            // consume ALL pending terminal events — zero-blocking poll loop
+            // then sleep only when truly idle (no pending events at all)
+            let mut had_event = false;
+            loop {
+                match event::poll(Duration::from_secs(0)) {
+                    Ok(true) => {
+                        had_event = true;
+                        match event::read() {
+                            Ok(Event::Key(k)) => {
+                                if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                                    self.exit_requested = true; break;
                                 }
+                                if (k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat)
+                                    && !self.handle_key(k.code) { self.exit_requested = true; break; }
                             }
-                            MouseEventKind::ScrollDown => {
-                                const S: usize = 3;
-                                if m.column < 30 {
-                                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(S)
-                                        .min(self.sidebar_items.len().saturating_sub(1));
-                                    let max_vis = (12usize).min(self.sidebar_items.len());
-                                    if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
-                                    if self.sel >= self.sidebar_scroll + max_vis {
-                                        self.sel = self.sidebar_scroll + max_vis - 1;
+                            Ok(Event::Mouse(m)) => {
+                                match m.kind {
+                                    MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                        if m.column < 30 {
+                                            self.focus = Focus::Sidebar;
+                                            let list_row = m.row.saturating_sub(2) as usize;
+                                            let idx = list_row + self.sidebar_scroll;
+                                            if idx < self.sidebar_items.len() {
+                                                self.sel = idx;
+                                                self.activate_sidebar_selection();
+                                            }
+                                        } else { self.focus = Focus::Chat; }
                                     }
-                                } else {
-                                    // scroll down = go toward bottom
-                                    if !self.at_end {
-                                        if self.scroll > S {
-                                            self.scroll -= S;
-                                        } else {
-                                            self.at_end = true;
-                                            self.scroll = 0;
+                                    MouseEventKind::ScrollDown => {
+                                        const S: usize = 3;
+                                        if m.column < 30 {
+                                            self.sidebar_scroll = self.sidebar_scroll.saturating_add(S)
+                                                .min(self.sidebar_items.len().saturating_sub(1));
+                                            let mv = (12usize).min(self.sidebar_items.len());
+                                            if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
+                                            if self.sel >= self.sidebar_scroll + mv { self.sel = self.sidebar_scroll + mv - 1; }
+                                        } else if !self.at_end {
+                                            if self.scroll > S { self.scroll -= S; } else { self.at_end = true; self.scroll = 0; }
                                         }
                                     }
+                                    MouseEventKind::ScrollUp => {
+                                        const S: usize = 3;
+                                        if m.column < 30 {
+                                            self.sidebar_scroll = self.sidebar_scroll.saturating_sub(S);
+                                            if self.sel >= self.sidebar_scroll + 12 { self.sel = self.sidebar_scroll + 11; }
+                                        } else if self.at_end {
+                                            self.at_end = false; self.scroll = S;
+                                        } else {
+                                            self.scroll = self.scroll.saturating_add(S);
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
-                            MouseEventKind::ScrollUp => {
-                                const S: usize = 3;
-                                if m.column < 30 {
-                                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(S);
-                                    if self.sel >= self.sidebar_scroll + 12 {
-                                        self.sel = self.sidebar_scroll + 11;
-                                    }
-                                } else {
-                                    // scroll up = scroll away from bottom
-                                    if self.at_end {
-                                        self.at_end = false;
-                                        self.scroll = S;
-                                    } else {
-                                        self.scroll = self.scroll.saturating_add(S);
-                                    }
-                                }
-                            }
-                            _ => {}
+                            Ok(_) => {}
+                            Err(_) => { self.exit_requested = true; break; }
                         }
                     }
-                    Ok(_) => {}
-                    Err(_) => break,
-                },
-                Ok(false) => {}
-                Err(_) => break,
+                    Ok(false) => break,  // no more pending events — exit spin loop
+                    Err(_) => { self.exit_requested = true; break; }
+                }
+                if self.exit_requested { break; }
+            }
+            if self.exit_requested { break; }
+
+            // if we processed an event, redraw immediately (loop next iter)
+            // if no events, brief sleep to prevent 100% CPU
+            if !had_event {
+                tokio::time::sleep(Duration::from_millis(8)).await;
             }
         }
         // cleanup — runs on Ctrl+C or /exit
@@ -235,7 +223,6 @@ impl App {
     }
 
     fn add(&mut self, role: &str, text: &str) {
-        self.dirty = true;
         if text.trim().is_empty() { return; }
         self.msgs.push(Msg { role: role.into(), text: text.into(), raw: None, done: false });
         if self.at_end {
@@ -244,7 +231,6 @@ impl App {
     }
 
     fn add_tool(&mut self, json: &str) {
-        self.dirty = true;
         let v: Value = serde_json::from_str(json).unwrap_or_default();
         let tool = v["tool"].as_str().unwrap_or("?");
         let args = v.get("args").and_then(|a| a.as_object())
@@ -291,7 +277,6 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        self.dirty = true;
         // Tab: cycle autocomplete suggestions if any, else toggle focus
         if code == KeyCode::Tab {
             if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
