@@ -36,6 +36,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(chunks[1]);
     draw_sidebar(f, app, main[0]);
     draw_chat(f, app, main[1]);
+    draw_autocomplete_popup(f, app, chunks[2]);
     draw_input(f, app, chunks[2]);
 }
 
@@ -240,6 +241,49 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Text::from(lines)).scroll((off as u16, 0)).style(Style::new().bg(BG)),
         area,
+    );
+}
+
+// ── Autocomplete popup (Discord-style) ──
+
+fn draw_autocomplete_popup(f: &mut Frame, app: &App, input_area: Rect) {
+    let suggestions = &app.autocomplete_suggestions;
+    if suggestions.is_empty() || app.focus != crate::app::Focus::Chat { return; }
+    if app.input.trim().is_empty() || !app.input.trim().starts_with('/') { return; }
+
+    let popup_items: Vec<ListItem> = suggestions.iter().enumerate().map(|(i, cmd)| {
+        let highlight = Some(i) == app.autocomplete_idx;
+        let desc = match cmd.as_str() {
+            "/exit" => "Exit the program",
+            "/help" => "Show help",
+            "/sessions" => "Toggle sidebar",
+            "/new" => "Create new session",
+            _ => "",
+        };
+        let style = if highlight {
+            Style::new().bg(ACCENT).fg(BG)
+        } else {
+            Style::new().bg(BORDER).fg(TEXT)
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(format!(" {} ", cmd), style.add_modifier(if highlight { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(desc, Style::new().fg(if highlight { BG } else { DIM }).bg(if highlight { ACCENT } else { BORDER })),
+        ]))
+    }).collect();
+
+    let height = popup_items.len() as u16 + 1; // +1 for border
+    // popup above input bar
+    let px = input_area.x + 1;
+    let py = input_area.y.saturating_sub(height);
+    let pw = 32u16;
+    let popup_rect = Rect::new(px, py, pw.min(input_area.width.saturating_sub(1)), height);
+
+    // background
+    f.render_widget(Paragraph::new("").style(Style::new().bg(BORDER)), popup_rect);
+    // items
+    f.render_widget(
+        List::new(popup_items).style(Style::new().bg(BORDER)),
+        Rect::new(popup_rect.x, popup_rect.y, popup_rect.width, popup_rect.height.saturating_sub(1)),
     );
 }
 

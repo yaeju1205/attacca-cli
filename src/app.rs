@@ -54,7 +54,9 @@ pub struct App {
     expanded_projects: std::collections::HashSet<String>,
     project_names: HashMap<String, String>,
     exit_requested: bool,
-    pub focus: Focus, // which pane is focused
+    pub focus: Focus,
+    pub autocomplete_suggestions: Vec<String>,
+    pub autocomplete_idx: Option<usize>,
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
@@ -78,6 +80,8 @@ impl App {
             project_names: HashMap::new(),
             exit_requested: false,
             focus: Focus::Chat,
+            autocomplete_suggestions: vec![],
+            autocomplete_idx: None,
             bg_tx: tx, bg_rx: rx, actions: vec![],
         }
     }
@@ -242,12 +246,16 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        // Tab always toggles focus
+        // Tab: cycle autocomplete OR toggle focus
         if code == KeyCode::Tab {
-            self.focus = match self.focus {
-                Focus::Chat => Focus::Sidebar,
-                Focus::Sidebar => Focus::Chat,
-            };
+            if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
+                self.cycle_autocomplete();
+            } else {
+                self.focus = match self.focus {
+                    Focus::Chat => Focus::Sidebar,
+                    Focus::Sidebar => Focus::Chat,
+                };
+            }
             return true;
         }
 
@@ -260,12 +268,12 @@ impl App {
     fn handle_sidebar_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Up => {
-                if self.sel > 0 { self.sel -= 1; }
+                if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); }
                 return true;
             }
             KeyCode::Down => {
                 let max = self.sidebar_items.len().saturating_sub(1);
-                if self.sel < max { self.sel += 1; }
+                if self.sel < max { self.sel += 1; self.clamp_sidebar_scroll(); }
                 return true;
             }
             KeyCode::Enter | KeyCode::Right => {
@@ -377,13 +385,49 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false),
             KeyCode::Char(c) => {
                 self.input.push(c);
+                self.update_autocomplete();
             }
             KeyCode::Backspace => {
                 self.input.pop();
+                self.update_autocomplete();
             }
             _ => {}
         }
         true
+    }
+
+    fn update_autocomplete(&mut self) {
+        self.autocomplete_suggestions.clear();
+        self.autocomplete_idx = None;
+        let trimmed = self.input.trim();
+        if trimmed.starts_with('/') && !trimmed.is_empty() && trimmed.len() > 1 {
+            let cmds = ["/exit", "/help", "/sessions", "/new"];
+            for cmd in &cmds {
+                if cmd.starts_with(trimmed) {
+                    self.autocomplete_suggestions.push(cmd.to_string());
+                }
+            }
+        }
+    }
+
+    fn cycle_autocomplete(&mut self) {
+        let n = self.autocomplete_suggestions.len();
+        if n == 0 { return; }
+        let next = self.autocomplete_idx.map(|i| (i + 1) % n).unwrap_or(0);
+        self.autocomplete_idx = Some(next);
+        if let Some(cmd) = self.autocomplete_suggestions.get(next) {
+            self.input = cmd.clone();
+            self.input.push(' ');
+        }
+    }
+
+    fn clamp_sidebar_scroll(&mut self) {
+        let vis = 12usize;
+        if self.sel < self.sidebar_scroll {
+            self.sidebar_scroll = self.sel;
+        } else if self.sel >= self.sidebar_scroll + vis {
+            self.sidebar_scroll = self.sel.saturating_sub(vis) + 1;
+        }
     }
 
     fn activate_sidebar_selection(&mut self) {
