@@ -167,21 +167,34 @@ impl App {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
-                                self.sidebar_scroll = self.sidebar_scroll.saturating_add(1)
-                                    .min(self.sidebar_items.len().saturating_sub(1));
-                                // keep sel in view
-                                if self.sel < self.sidebar_scroll {
-                                    self.sel = self.sidebar_scroll;
-                                }
-                                let max_vis = (12usize).min(self.sidebar_items.len());
-                                if self.sel >= self.sidebar_scroll + max_vis {
-                                    self.sel = self.sidebar_scroll + max_vis - 1;
+                                if m.column < 30 {
+                                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1)
+                                        .min(self.sidebar_items.len().saturating_sub(1));
+                                    let max_vis = (12usize).min(self.sidebar_items.len());
+                                    if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
+                                    if self.sel >= self.sidebar_scroll + max_vis {
+                                        self.sel = self.sidebar_scroll + max_vis - 1;
+                                    }
+                                } else {
+                                    // chat scroll
+                                    if self.scroll != usize::MAX {
+                                        self.scroll = self.scroll.saturating_add(1);
+                                    }
                                 }
                             }
                             MouseEventKind::ScrollUp => {
-                                self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
-                                if self.sel >= self.sidebar_scroll + 12 {
-                                    self.sel = self.sidebar_scroll + 11;
+                                if m.column < 30 {
+                                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+                                    if self.sel >= self.sidebar_scroll + 12 {
+                                        self.sel = self.sidebar_scroll + 11;
+                                    }
+                                } else {
+                                    // chat scroll
+                                    if self.scroll > 0 && self.scroll != usize::MAX {
+                                        self.scroll -= 1;
+                                    } else if self.scroll == usize::MAX {
+                                        self.scroll = 0;
+                                    }
                                 }
                             }
                             _ => {}
