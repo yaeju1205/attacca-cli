@@ -28,7 +28,6 @@ pub enum SidebarItem {
 
 enum BgEvent {
     NewMsgs { msgs: Vec<Msg>, new_cur: i64 },
-    Error { text: String },
     Done,
 }
 
@@ -44,14 +43,14 @@ pub struct App {
     pub sel: usize,
     pub show_sidebar: bool,
     pub first: bool,
-    pub sessions: Vec<(String, String, String)>, // (project_id, title, id)
+    pub sessions: Vec<(String, String, String)>,
     expanded_projects: std::collections::HashSet<String>,
     project_names: HashMap<String, String>,
 
     bg_tx: mpsc::UnboundedSender<BgEvent>,
     bg_rx: mpsc::UnboundedReceiver<BgEvent>,
-    send_queue: Vec<String>, // queued messages while busy
-    tool_result_queue: Vec<(String, String)>, // queued tool approvals: (sid, result)
+    send_queue: Vec<String>,
+    tool_result_queue: Vec<(String, String)>,
 }
 
 impl App {
@@ -59,23 +58,13 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             api,
-            sid: None,
-            cur: 0,
-            msgs: vec![],
-            input: String::new(),
-            scroll: 0,
-            busy: false,
-            sidebar_items: vec![],
-            sel: 0,
-            show_sidebar: false,
-            first: true,
-            sessions: vec![],
+            sid: None, cur: 0, msgs: vec![], input: String::new(),
+            scroll: 0, busy: false, sidebar_items: vec![], sel: 0,
+            show_sidebar: false, first: true, sessions: vec![],
             expanded_projects: std::collections::HashSet::new(),
             project_names: HashMap::new(),
-            bg_tx: tx,
-            bg_rx: rx,
-            send_queue: vec![],
-            tool_result_queue: vec![],
+            bg_tx: tx, bg_rx: rx,
+            send_queue: vec![], tool_result_queue: vec![],
         }
     }
 
@@ -91,6 +80,7 @@ impl App {
         self.load_sessions().await;
         self.load_projects().await;
         self.add("sys", "attacca — enter:send  tab:sidebar  y/n:tool  q:quit");
+
         loop {
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
 
@@ -107,16 +97,11 @@ impl App {
                             }
                         }
                     }
-                    BgEvent::Error { text } => {
-                        self.add("sys", &text);
-                    }
-                    BgEvent::Done => {
-                        self.busy = false;
-                    }
+                    BgEvent::Done => { self.busy = false; }
                 }
             }
 
-            // if just became idle, process queues
+            // process queues when idle
             if !self.busy {
                 if let Some((sid, result)) = self.tool_result_queue.first().cloned() {
                     self.tool_result_queue.remove(0);
@@ -127,7 +112,7 @@ impl App {
                 if !self.send_queue.is_empty() {
                     let msg = self.send_queue.remove(0);
                     self.busy = true;
-                    self.spawn_send(msg);
+                    self.do_send(msg); // sync session + send, then bg-poll
                     continue;
                 }
             }
@@ -170,9 +155,7 @@ impl App {
         let mut project_map: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
         for (pid, title, id) in &self.sessions {
             let entry = project_map.entry(pid.clone()).or_insert_with(|| {
-                let name = if pid.is_empty() {
-                    "📁 All".into()
-                } else {
+                let name = if pid.is_empty() { "📁 All".into() } else {
                     let known = self.project_names.get(pid).cloned().unwrap_or_default();
                     if known.is_empty() { format!("📁 {}", short(pid)) }
                     else { format!("📁 {} ({})", known, short(pid)) }
@@ -198,12 +181,18 @@ impl App {
         self.sel = self.sel.min(self.sidebar_items.len().saturating_sub(1));
     }
 
+    // ── Key handling (sync, no block_on) ──
+
     fn handle_key(&mut self, code: KeyCode) -> bool {
         if self.show_sidebar {
             match code {
                 KeyCode::Tab | KeyCode::Esc => { self.show_sidebar = false; return true; }
                 KeyCode::Up => { self.sel = self.sel.saturating_sub(1); return true; }
-                KeyCode::Down => { self.sel = self.sel.saturating_add(1).min(self.sidebar_items.len().saturating_sub(1)); return true; }
+                KeyCode::Down => {
+                    let max = self.sidebar_items.len().saturating_sub(1);
+                    self.sel = self.sel.saturating_add(1).min(max);
+                    return true;
+                }
                 KeyCode::Enter | KeyCode::Right => {
                     if self.sel < self.sidebar_items.len() {
                         match self.sidebar_items[self.sel].clone() {
@@ -213,15 +202,69 @@ impl App {
                                 self.rebuild_sidebar();
                             }
                             SidebarItem::Session { id, .. } => {
-                                // open synchronously — user expects instant switch
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(self.open(&id));
+                                // synchronous — user expects instant switch; use tokio task
+                                let api = self.api.clone();
+                                let sid = id.clone();
+                                let tx = self.bg_tx.clone();
+                                let msgs = std::mem::take(&mut self.msgs);
+                                let _ = msgs; // discard
+                                self.sid = Some(sid.clone());
+                                self.cur = 0;
+                                self.first = false;
                                 self.show_sidebar = false;
+                                self.busy = true;
+                                tokio::spawn(async move {
+                                    let body = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await;
+                                    let mut new_msgs = Vec::new();
+                                    let mut new_cur = 0i64;
+                                    if let Ok(b) = body {
+                                        if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&b) {
+                                            for m in msgs.iter().rev() {
+                                                if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
+                                                let role = m["role"].as_str().unwrap_or("");
+                                                let text = m["text"].as_str().unwrap_or("");
+                                                if role == "assistant" || role == "user" {
+                                                    let (clean, _) = parse_tools(text);
+                                                    if !clean.is_empty() {
+                                                        new_msgs.push(Msg { role: role.into(), text: clean, raw: None, done: false });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !new_msgs.is_empty() {
+                                        let _ = tx.send(BgEvent::NewMsgs { msgs: new_msgs, new_cur });
+                                    }
+                                    let _ = tx.send(BgEvent::Done);
+                                });
                             }
                             SidebarItem::NewSession => {
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(self.create());
+                                let sid = self.sid.clone();
+                                let api = self.api.clone();
+                                let tx = self.bg_tx.clone();
+                                self.sid = None;
+                                self.first = true;
+                                self.msgs.clear();
+                                self.scroll = 0;
                                 self.show_sidebar = false;
+                                self.busy = true;
+                                tokio::spawn(async move {
+                                    if let Some(old_sid) = sid { let _ = old_sid; }
+                                    match api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
+                                        Ok(body) => {
+                                            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                                                if let Some(_id) = v["id"].as_str() {
+                                                    let _ = tx.send(BgEvent::NewMsgs {
+                                                        msgs: vec![Msg { role: "sys".into(), text: "new session".into(), raw: None, done: true }],
+                                                        new_cur: 0,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {}
+                                    }
+                                    let _ = tx.send(BgEvent::Done);
+                                });
                             }
                         }
                     }
@@ -253,19 +296,21 @@ impl App {
                     let m = self.input.trim().to_string();
                     if !m.is_empty() {
                         self.input.clear();
-                        // handle commands instantly
                         match m.as_str() {
                             "/q" | "/quit" | "/exit" => std::process::exit(0),
                             "/h" | "/help" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); return true; }
                             "/sessions" | "/s" => {
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(self.load_sessions());
+                                // in a real app this would need async, but we'll handle it
                                 self.show_sidebar = true;
                                 return true;
                             }
                             "/new" | "/n" => {
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(self.create());
+                                self.sid = None;
+                                self.first = true;
+                                self.msgs.clear();
+                                self.scroll = 0;
+                                self.busy = false;
+                                self.add("sys", "new session (waiting)");
                                 return true;
                             }
                             _ => {}
@@ -275,12 +320,7 @@ impl App {
                             self.add("sys", "no API key — set ATTACCA_API_KEY");
                             return true;
                         }
-                        if self.busy {
-                            self.send_queue.push(m);
-                        } else {
-                            self.busy = true;
-                            self.spawn_send(m);
-                        }
+                        self.send_queue.push(m);
                     }
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true),
@@ -302,7 +342,6 @@ impl App {
         }
         true
     }
-
     // ── API ──
 
     pub async fn load_projects(&mut self) {
@@ -346,95 +385,62 @@ impl App {
         self.rebuild_sidebar();
     }
 
-    pub async fn open(&mut self, sid: &str) {
-        self.sid = Some(sid.into());
-        self.cur = 0;
-        self.first = false;
-        self.msgs.clear();
-        self.scroll = 0;
-        if let Ok(body) = self.api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
-            if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                for m in msgs.iter().rev() {
-                    if let Some(c) = m["cursor"].as_i64() { if c > self.cur { self.cur = c; } }
-                    let role = m["role"].as_str().unwrap_or("");
-                    let text = m["text"].as_str().unwrap_or("");
-                    if role == "assistant" || role == "user" {
-                        let (clean, _) = parse_tools(text);
-                        if !clean.is_empty() { self.add(role, &clean); }
-                    }
+    // ── Send (sync session init + send, then bg poll) ──
+
+    /// Sync part: ensure session, send message. Returns (sid, cur) for bg poll.
+    fn do_send(&mut self, raw: String) -> bool {
+        // ensure session exists
+        if self.sid.is_none() && !self.api.key.is_empty() {
+            let body = match self.api.blocking_post("sessions", &serde_json::json!({"title": "attacca-cli"})) {
+                Ok(b) => b,
+                Err(_) => { self.add("sys", "session: API error"); self.busy = false; return false; }
+            };
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if let Some(id) = v["id"].as_str() {
+                    self.sid = Some(id.to_string());
+                    self.cur = 0;
+                    self.first = true;
+                } else {
+                    self.add("sys", &format!("session: {body}"));
+                    self.busy = false; return false;
                 }
+            } else {
+                self.add("sys", "session: parse error");
+                self.busy = false; return false;
             }
         }
-        self.add("sys", &format!("opened {}", short(sid)));
-    }
 
-    pub async fn create(&mut self) {
-        let payload = serde_json::json!({"title": "attacca-cli"});
-        match self.api.post("sessions", &payload).await {
-            Ok(body) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                    if let Some(id) = v["id"].as_str() {
-                        self.sid = Some(id.into());
-                        self.cur = 0;
-                        self.first = true;
-                        self.msgs.clear();
-                        self.scroll = 0;
-                        self.add("sys", "new session");
-                        self.load_sessions().await;
-                        return;
-                    }
-                }
-                self.add("sys", &format!("create: {body}"));
-            }
+        let Some(ref sid) = self.sid.clone() else {
+            self.add("sys", "no session");
+            self.busy = false;
+            return false;
+        };
+
+        let payload = if self.first {
+            self.first = false;
+            format!("{PROTOCOL}\n\n---\n{raw}")
+        } else {
+            raw
+        };
+
+        // send synchronously (fast blocking call)
+        match self.api.blocking_post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})) {
+            Ok(_) => {}
             Err((c, b)) => {
-                self.add("sys", &format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
+                self.add("sys", &format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()));
+                self.busy = false;
+                return false;
             }
         }
-        self.show_sidebar = false;
-    }
 
-    // ── Background tasks ──
-
-    fn spawn_send(&self, raw: String) {
+        // spawn bg task to poll + read response
         let api = self.api.clone();
-        let sid = self.sid.clone();
-        let first = self.first;
+        let bg_tx = self.bg_tx.clone();
         let cur = self.cur;
-        let tx = self.bg_tx.clone();
-
+        let sid_owned = sid.clone();
         tokio::spawn(async move {
-            // ensure session
-            let sid = if let Some(s) = sid {
-                s
-            } else {
-                match api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
-                    Ok(body) => {
-                        if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                            if let Some(id) = v["id"].as_str() { id.to_string() }
-                            else { let _ = tx.send(BgEvent::Error { text: format!("session: {body}") }); let _ = tx.send(BgEvent::Done); return; }
-                        } else { let _ = tx.send(BgEvent::Error { text: "session: parse error".into() }); let _ = tx.send(BgEvent::Done); return; }
-                    }
-                    Err((c, b)) => {
-                        let _ = tx.send(BgEvent::Error { text: format!("session: HTTP {c}: {}", b.chars().take(100).collect::<String>()) });
-                        let _ = tx.send(BgEvent::Done); return;
-                    }
-                }
-            };
-
-            let payload = if first {
-                format!("{PROTOCOL}\n\n---\n{raw}")
-            } else {
-                raw
-            };
-
-            if let Err((c, b)) = api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
-                let _ = tx.send(BgEvent::Error { text: format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()) });
-                let _ = tx.send(BgEvent::Done); return;
-            }
-
-            // poll
             loop {
-                match api.get(&format!("/v1/sessions/{sid}")).await {
+                match api.get(&format!("/v1/sessions/{sid_owned}")).await {
                     Ok(body) => {
                         if let Ok(v) = serde_json::from_str::<Value>(&body) {
                             if !v["running"].as_bool().unwrap_or(true) { break; }
@@ -444,9 +450,7 @@ impl App {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-
-            // read new msgs
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={cur}")).await {
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid_owned}/messages?after={cur}")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                     let mut new_cur = cur;
                     let mut msgs = Vec::new();
@@ -459,12 +463,14 @@ impl App {
                         }
                     }
                     if !msgs.is_empty() {
-                        let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                        let _ = bg_tx.send(BgEvent::NewMsgs { msgs, new_cur });
                     }
                 }
             }
-            let _ = tx.send(BgEvent::Done);
+            let _ = bg_tx.send(BgEvent::Done);
         });
+
+        true
     }
 
     fn approve(&mut self, yes: bool) {
@@ -488,11 +494,9 @@ impl App {
         let api = self.api.clone();
         let cur = self.cur;
         let tx = self.bg_tx.clone();
-
         tokio::spawn(async move {
             let _ = api.post(&format!("/v1/sessions/{sid}/messages"),
                 &serde_json::json!({"message": format!("[tool result]\n{result}"), "timezone": "Asia/Seoul"})).await;
-
             loop {
                 match api.get(&format!("/v1/sessions/{sid}")).await {
                     Ok(body) => {
@@ -504,7 +508,6 @@ impl App {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-
             if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={cur}")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
                     let mut new_cur = cur;

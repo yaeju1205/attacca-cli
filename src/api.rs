@@ -67,6 +67,25 @@ impl Api {
         }
     }
 
+    /// Synchronous POST using reqwest's blocking client.
+    pub fn blocking_post(&self, path: &str, json: &Value) -> Result<String, (u16, String)> {
+        let url = self.url(path);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent("attacca-cli/0.2")
+            .build()
+            .unwrap_or_default();
+        let resp = client.post(&url).headers(self.headers()).json(json).send();
+        match resp {
+            Ok(r) => {
+                let s = r.status().as_u16();
+                let body = r.text().unwrap_or_default();
+                if s < 300 || s == 202 { Ok(body) } else { Err((s, body)) }
+            }
+            Err(e) => Err((0, format!("{e}"))),
+        }
+    }
+
     pub async fn whoami(&self) -> String {
         match self.get("me").await {
             Ok(body) => {
