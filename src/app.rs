@@ -544,11 +544,11 @@ impl App {
         let tx = self.bg_tx.clone();
         let user_msg = raw.clone();
         let had_sid = self.sid.clone();
-        let cur = self.cur;
         let is_first = self.first;
         if is_first { self.first = false; }
 
         tokio::spawn(async move {
+            // 1. Ensure session
             let sid = if let Some(s) = had_sid { s }
             else {
                 match api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
@@ -560,31 +560,22 @@ impl App {
                             } else { let _ = tx.send(BgEvent::Done); return; }
                         } else { let _ = tx.send(BgEvent::Done); return; }
                     }
-                    Err((c, b)) => {
-                        let _ = tx.send(BgEvent::NewMsgs {
-                            msgs: vec![Msg { role: "sys".into(), text: format!("session: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true }],
-                            new_cur: 0,
-                        });
-                        let _ = tx.send(BgEvent::Done); return;
-                    }
+                    Err(_) => { let _ = tx.send(BgEvent::Done); return; }
                 }
             };
 
+            // 2. Send message
             let payload = if is_first {
                 format!("{PROTOCOL}\n\n---\n{user_msg}")
             } else {
                 user_msg
             };
 
-            if let Err((c, b)) = api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
-                let _ = tx.send(BgEvent::NewMsgs {
-                    msgs: vec![Msg { role: "sys".into(), text: format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true }],
-                    new_cur: 0,
-                });
+            if let Err(_) = api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
                 let _ = tx.send(BgEvent::Done); return;
             }
 
-            // poll
+            // 3. Poll (200ms interval — fast for local connections)
             loop {
                 match api.get(&format!("/v1/sessions/{sid}")).await {
                     Ok(body) => {
@@ -594,17 +585,17 @@ impl App {
                     }
                     Err(_) => break,
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
 
-            // read new msgs
-            let read_after = cur;
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={read_after}")).await {
+            // 4. Read ALL assistant messages from the session (after=0)
+            // This is simpler and more reliable than cursor tracking.
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                    let mut new_cur = read_after;
+                    let mut new_cur = 0i64;
                     let mut msgs = Vec::new();
                     for m in &raw_msgs {
-                        if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
+                        if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
                         if m["role"].as_str() == Some("assistant") {
                             if let Some(text) = m["text"].as_str() {
                                 msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
@@ -634,7 +625,6 @@ impl App {
         self.busy_count += 1;
         let api = self.api.clone();
         let tx = self.bg_tx.clone();
-        let cur = self.cur;
         tokio::spawn(async move {
             let _ = api.post(&format!("/v1/sessions/{sid}/messages"),
                 &serde_json::json!({"message": format!("[tool result]\n{result}"), "timezone": "Asia/Seoul"})).await;
@@ -647,14 +637,14 @@ impl App {
                     }
                     Err(_) => break,
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={cur}")).await {
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                    let mut new_cur = cur;
+                    let mut new_cur = 0i64;
                     let mut msgs = Vec::new();
                     for m in &raw_msgs {
-                        if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
+                        if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
                         if m["role"].as_str() == Some("assistant") {
                             if let Some(text) = m["text"].as_str() {
                                 msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
