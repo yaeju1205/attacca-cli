@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // status bar
             Constraint::Min(3),    // main content (chat + sidebar)
-            Constraint::Length(5), // input area: info/separator + 4 content
+            Constraint::Length(7), // input area: info/separator + 6 content
         ])
         .split(a);
 
@@ -335,9 +335,9 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
 
     let segments: Vec<&str> = app.input.split('\n').collect();
     let total = segments.len();
-    let show_from = total.saturating_sub(3); // 3 input lines + "..." line = 4 lines fills content area
-    // When input exceeds 3 lines, show last 3 lines with "..." above.
-    // The cursor line (last) is always visible — scroll follows automatically.
+    let show_from = total.saturating_sub(5); // show last 5 input lines when over 5
+    // When input exceeds 5 lines, only the last 5 lines are shown.
+    // The cursor (last line) is always visible — scroll follows automatically.
 
     let mut display: Vec<Line> = Vec::new();
 
