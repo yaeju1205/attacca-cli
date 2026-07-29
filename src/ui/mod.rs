@@ -335,10 +335,8 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
 
     let segments: Vec<&str> = app.input.split('\n').collect();
     let total = segments.len();
-    let show_from = total.saturating_sub(5); // show last 5 input lines when over 5
-    // When input exceeds 5 lines, only the last 5 lines are shown.
-    // The cursor (last line) is always visible — scroll follows automatically.
 
+    // Build display: every input line as a separate ratatui Line
     let mut display: Vec<Line> = Vec::new();
 
     if app.input.is_empty() {
@@ -348,17 +346,10 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("█", Style::new().fg(P)),
         ]));
     } else {
-        if show_from > 0 {
-            display.push(Line::from(vec![
-                Span::styled("   ", Style::new().fg(DIM)),
-                Span::styled("...", Style::new().fg(DIM)),
-            ]));
-        }
-        for i in show_from..total {
-            let seg = segments[i];
+        for (i, seg) in segments.iter().enumerate() {
             let is_last = i == total - 1;
             let cursor_ch = if is_last { "█" } else { "" };
-            if i == 0 && show_from == 0 {
+            if i == 0 {
                 display.push(Line::from(vec![
                     prompt.clone(),
                     Span::raw(seg.to_string()),
@@ -374,8 +365,13 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // Scroll to show the last 3 lines; anything before scrolls out of view.
+    let content_lines = text_area.height as usize;
+    let scroll_off = total.saturating_sub(content_lines);
+
     f.render_widget(
         Paragraph::new(Text::from(display))
+            .scroll((scroll_off as u16, 0))
             .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         text_area,
