@@ -70,6 +70,7 @@ impl App {
             Err(_) => { eprintln!("term init failed"); return; }
         };
         term.clear().ok();
+        self.load_sessions().await;
         self.add("sys", "attacca — enter:send  tab:sidebar  y/n:tool  q:quit");
         loop {
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
