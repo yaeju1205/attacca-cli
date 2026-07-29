@@ -7,10 +7,14 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, Focus, SidebarItem};
+use crate::app::{App, Focus, Msg, MsgKind, SidebarItem};
+use crate::util::short;
 use palette::*;
 
 mod palette;
+
+/// Trailing block drawn on a card that is still receiving token deltas.
+const CURSOR: &str = "▌";
 
 /// Top-level draw entry point, called once per frame.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -41,31 +45,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 // Status bar
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let mode = if app.transport.key.is_empty() {
-        Span::styled("  offline", Style::new().fg(DESTRUCTIVE))
-    } else {
+    let mode = if app.connected {
         Span::styled("  ◉ online", Style::new().fg(GREEN))
+    } else {
+        Span::styled("  offline", Style::new().fg(DESTRUCTIVE))
     };
 
     let sid = app.sid.as_ref().map(|s| short(s)).unwrap_or_default();
-    let status = if app.busy() {
-        "running"
-    } else if app.has_pending_tool() {
-        "pending"
-    } else {
-        "ready"
-    };
-    let status_color = if app.busy() {
-        YELLOW
-    } else if app.has_pending_tool() {
-        P
-    } else {
-        GREEN
-    };
+    let status = if app.busy() { "running" } else { "ready" };
+    let status_color = if app.busy() { YELLOW } else { GREEN };
 
     let mut right = Vec::new();
-    if !app.user_name.is_empty() {
-        right.push(Span::styled(format!("  {}", app.user_name), Style::new().fg(TEXT)));
+    if let Some(me) = &app.me {
+        right.push(Span::styled(
+            format!("  {}", me.display_name),
+            Style::new().fg(TEXT),
+        ));
     }
     if !sid.is_empty() {
         right.push(Span::styled(format!("  {sid}"), Style::new().fg(DIM)));
@@ -131,8 +126,8 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         format!(" {} {} {}", icon, short_name(name, 16), session_count), s,
                     )]))
                 }
-                SidebarItem::Session { title, active, .. } => {
-                    let dot = if *active { "●" } else { "○" };
+                SidebarItem::Session { title, active, running, .. } => {
+                    let dot = if *running { "◉" } else if *active { "●" } else { "○" };
                     let s = if *active && focused {
                         Style::new().fg(P).add_modifier(Modifier::BOLD)
                             .bg(if hl { ACCENT_BG } else { POPOVER })
@@ -179,105 +174,161 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// One bordered message card: a header rule, the hard-wrapped body behind a `│ ` rail,
+/// and a footer rule.
+///
+/// This is the only place message bodies are wrapped. [`wrap_chars`] is width-aware, so
+/// double-width characters cannot overflow the panel — and the streaming cursor is
+/// appended as its own span rather than a character, so it never enters the wrap and
+/// never changes the row count. Both properties are load-bearing for the scroll offset
+/// in [`draw_chat`], which is computed from `lines.len()`.
+#[allow(clippy::too_many_arguments)]
+fn card(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    w: usize,
+    content_width: usize,
+    head_style: Style,
+    rail_style: Style,
+    body_style: Style,
+    text: &str,
+    streaming: bool,
+) {
+    let head = format!("┌─ {label} ");
+    lines.push(Line::from(vec![Span::styled(
+        head.clone() + &"─".repeat(w.saturating_sub(head.chars().count())),
+        head_style,
+    )]));
+
+    let rows: Vec<String> = text
+        .lines()
+        .flat_map(|l| wrap_chars(l, content_width))
+        .collect();
+    let last = rows.len().saturating_sub(1);
+    for (i, chunk) in rows.into_iter().enumerate() {
+        let mut spans = vec![
+            Span::styled("│ ", rail_style),
+            Span::styled(chunk, body_style),
+        ];
+        if streaming && i == last {
+            spans.push(Span::styled(CURSOR, Style::new().fg(P)));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(vec![Span::styled(
+        "└".to_string() + &"─".repeat(w.saturating_sub(2)),
+        rail_style.add_modifier(Modifier::DIM),
+    )]));
+}
+
+/// Turn the transcript into visual rows. Split out from [`draw_chat`] so it can be
+/// tested without a `Frame`.
+fn chat_lines(msgs: &[Msg], w: usize, content_width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for m in msgs {
+        match m.kind {
+            MsgKind::Sys => {
+                lines.push(Line::from(vec![
+                    Span::styled(" ── ", Style::new().fg(DIM)),
+                    Span::styled(m.text.clone(), Style::new().fg(DIM)),
+                ]));
+            }
+            MsgKind::Agent => card(
+                &mut lines,
+                "assistant",
+                w,
+                content_width,
+                Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
+                Style::new().fg(DIM),
+                Style::new(),
+                &m.text,
+                m.streaming,
+            ),
+            MsgKind::Reasoning => card(
+                &mut lines,
+                "thinking",
+                w,
+                content_width,
+                Style::new().fg(DIM).add_modifier(Modifier::DIM),
+                Style::new().fg(DIM),
+                Style::new().fg(DIM).add_modifier(Modifier::ITALIC),
+                &m.text,
+                m.streaming,
+            ),
+            MsgKind::User => card(
+                &mut lines,
+                "you",
+                w,
+                content_width,
+                Style::new().fg(P).add_modifier(Modifier::BOLD),
+                Style::new().fg(P),
+                Style::new(),
+                &m.text,
+                false,
+            ),
+            MsgKind::Tool => card(
+                &mut lines,
+                "tool",
+                w,
+                content_width,
+                Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
+                Style::new().fg(YELLOW),
+                Style::new().fg(TEXT),
+                &m.text,
+                false,
+            ),
+            MsgKind::Result => {
+                if let Some(first) = m.text.lines().next() {
+                    let ok = !m.text.starts_with("err");
+                    let (icon, color) = if ok { ("ok", GREEN) } else { ("✘", DESTRUCTIVE) };
+                    let label: String = first.chars().take(58).collect();
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("  {icon} {label}"),
+                        Style::new().fg(color),
+                    )]));
+                }
+            }
+        }
+    }
+
+    lines
+}
+
 // Chat area
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
     let w = area.width.saturating_sub(1) as usize;
     // Content width inside the "│ " gutter, used to hard-wrap message bodies
     // so long lines flow to the next row instead of overflowing the panel.
     let content_width = w.saturating_sub(2).max(1);
 
-    for m in &app.msgs {
-        match m.role.as_str() {
-            "sys" => {
-                lines.push(Line::from(vec![
-                    Span::styled(" ── ", Style::new().fg(DIM)),
-                    Span::styled(&m.text, Style::new().fg(DIM)),
-                ]));
-            }
-            "agent" => {
-                lines.push(Line::from(vec![Span::styled(
-                    "┌─ assistant ".to_string() + &"─".repeat(w.saturating_sub(13)),
-                    Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
-                )]));
-                for l in m.text.lines() {
-                    for chunk in wrap_chars(l, content_width) {
-                        lines.push(Line::from(vec![
-                            Span::styled("│ ", Style::new().fg(DIM)),
-                            Span::raw(chunk),
-                        ]));
-                    }
-                }
-                lines.push(Line::from(vec![Span::styled(
-                    "└".to_string() + &"─".repeat(w.saturating_sub(2)),
-                    Style::new().fg(DIM).add_modifier(Modifier::DIM),
-                )]));
-            }
-            "user" => {
-                lines.push(Line::from(vec![Span::styled(
-                    "┌─ you ".to_string() + &"─".repeat(w.saturating_sub(8)),
-                    Style::new().fg(P).add_modifier(Modifier::BOLD),
-                )]));
-                for l in m.text.lines() {
-                    for chunk in wrap_chars(l, content_width) {
-                        lines.push(Line::from(vec![
-                            Span::styled("│ ", Style::new().fg(P)),
-                            Span::raw(chunk),
-                        ]));
-                    }
-                }
-                lines.push(Line::from(vec![Span::styled(
-                    "└".to_string() + &"─".repeat(w.saturating_sub(2)),
-                    Style::new().fg(P).add_modifier(Modifier::DIM),
-                )]));
-            }
-            "tool" if !m.done => {
-                lines.push(Line::from(vec![Span::styled(
-                    "┌─ tool ".to_string() + &"─".repeat(w.saturating_sub(8)),
-                    Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
-                )]));
-                for chunk in wrap_chars(&m.text, content_width) {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", Style::new().fg(YELLOW)),
-                        Span::styled(chunk, Style::new().fg(TEXT)),
-                    ]));
-                }
-                lines.push(Line::from(vec![
-                    Span::styled("│ ", Style::new().fg(YELLOW)),
-                    Span::styled("[", Style::new().fg(DIM)),
-                    Span::styled("y", Style::new().fg(GREEN).add_modifier(Modifier::BOLD)),
-                    Span::styled("] run  [", Style::new().fg(DIM)),
-                    Span::styled("n", Style::new().fg(DESTRUCTIVE).add_modifier(Modifier::BOLD)),
-                    Span::styled("] skip", Style::new().fg(DIM)),
-                ]));
-                lines.push(Line::from(vec![Span::styled(
-                    "└".to_string() + &"─".repeat(w.saturating_sub(2)),
-                    Style::new().fg(YELLOW).add_modifier(Modifier::DIM),
-                )]));
-            }
-            "tool" => {}
-            "result" => {
-                if let Some(first) = m.text.lines().next() {
-                    let ok = !m.text.starts_with("err") && !m.text.starts_with("skipped");
-                    let (icon, color) = if ok { ("ok", GREEN) } else { ("✘", DESTRUCTIVE) };
-                    let label: String = first.chars().take(58).collect();
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {icon} {label}"), Style::new().fg(color)),
-                    ]));
-                }
-            }
-            _ => {}
-        }
-    }
+    // Reasoning cards carry two rows of chrome each and reasoning is frequent, so
+    // `ATTACCA_HIDE_REASONING=1` drops them rather than truncating them — truncation would change
+    // the row count on settle, and the scroll offset below is derived from `lines.len()`.
+    // Bound to the block so the default path borrows the transcript instead of copying it — this
+    // runs on every frame, and frames are ~125/s while a turn is streaming.
+    let filtered: Vec<Msg>;
+    let visible: &[Msg] = if app.hide_reasoning {
+        filtered = app
+            .chat
+            .msgs
+            .iter()
+            .filter(|m| m.kind != MsgKind::Reasoning)
+            .cloned()
+            .collect();
+        &filtered
+    } else {
+        &app.chat.msgs
+    };
+    let mut lines = chat_lines(visible, w, content_width);
 
     if lines.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", Style::new().fg(P)),
             Span::styled("type something —  enter:send  /help", Style::new().fg(DIM)),
         ]));
-    } else if app.busy()
-        && app.msgs.last().map(|m| m.role.as_str() == "user").unwrap_or(false)
-    {
+    } else if app.busy() && !app.chat.msgs.last().is_some_and(|m| m.streaming) {
         lines.push(Line::from(vec![
             Span::styled(" ◉ thinking…", Style::new().fg(P)),
         ]));
@@ -320,6 +371,12 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 s.push_str(&format!(" tokens:{}", app.usage_total_tokens));
             }
+        }
+        if !app.usage_credits_used.is_empty() {
+            s.push_str(&format!(" credits:{}", app.usage_credits_used));
+        }
+        if !app.usage_model.is_empty() {
+            s.push_str(&format!(" {}", app.usage_model));
         }
         if s.is_empty() { s = "  no session".to_string(); }
         s
@@ -450,10 +507,14 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
             let desc = match cmd.as_str() {
                 "/exit" => "exit",
                 "/help" => "help",
-                "/sessions" => "sidebar",
+                "/sessions" => "sidebar + refresh",
                 "/new" => "new chat",
-                "/login" => "set API key",
-                "/credits" => "account info",
+                "/cancel" => "stop the turn",
+                "/login" => "authorize node",
+                "/logout" => "forget credential",
+                "/whoami" => "identity, scopes",
+                "/usage" => "account + usage",
+                "/tools" => "server capabilities",
                 _ => "",
             };
             let s = if hl {
@@ -504,15 +565,96 @@ fn wrap_chars(seg: &str, width: usize) -> Vec<String> {
     rows
 }
 
-fn short(s: &str) -> String {
-    s.chars().take(8).collect()
-}
-
 fn short_name(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n > max {
         format!("{}..", s.chars().take(max.saturating_sub(2)).collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cols(s: &str) -> usize {
+        s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+    }
+
+    /// One sample per class `wrap_chars` has to get right: single-width, double-width,
+    /// the mix that broke the panel in the first place, emoji, and zero-width marks.
+    const SAMPLES: &[&str] = &[
+        "the quick brown fox jumps over the lazy dog",
+        "안녕하세요 반갑습니다 오늘도 좋은 하루 되세요",
+        "mixed 한글 and ASCII 텍스트 in one line 12345",
+        "🎉 emoji 🚀 mixed 🔥 with text",
+        "e\u{0301}gal combining\u{0301} marks\u{0301}",
+        "짧",
+    ];
+
+    /// Widths start at 2: a budget of 1 cannot hold a double-width character, and
+    /// `wrap_chars` emits it anyway rather than dropping it or looping forever.
+    const WIDTHS: std::ops::RangeInclusive<usize> = 2..=20;
+
+    #[test]
+    fn wrap_chars_never_exceeds_the_column_budget() {
+        for seg in SAMPLES {
+            for width in WIDTHS {
+                for row in wrap_chars(seg, width) {
+                    assert!(
+                        cols(&row) <= width,
+                        "{:?} at width {width} produced a {}-column row {:?}",
+                        seg,
+                        cols(&row),
+                        row
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_chars_preserves_every_character() {
+        for seg in SAMPLES {
+            for width in WIDTHS {
+                assert_eq!(
+                    wrap_chars(seg, width).concat(),
+                    **seg,
+                    "{seg:?} lost or gained characters at width {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_chars_yields_one_row_for_an_empty_segment() {
+        assert_eq!(wrap_chars("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn a_segment_that_fits_is_left_as_one_row() {
+        assert_eq!(wrap_chars("짧은 글", 10), vec!["짧은 글".to_string()]);
+    }
+
+    #[test]
+    fn a_streaming_card_adds_exactly_one_row_beyond_its_wrapped_body() {
+        // `draw_chat` derives its scroll offset from `lines.len()`, so a card must occupy
+        // the same number of rows streaming as settled — otherwise the viewport jumps at
+        // the moment the cursor disappears.
+        let text = "안녕하세요 반갑습니다 오늘도 좋은 하루 되세요 and then some ASCII to push it over";
+        for w in [20usize, 40, 80] {
+            let cw = w.saturating_sub(2).max(1);
+            let plain = Style::new();
+            let mut streaming = Vec::new();
+            card(&mut streaming, "assistant", w, cw, plain, plain, plain, text, true);
+            let mut settled = Vec::new();
+            card(&mut settled, "assistant", w, cw, plain, plain, plain, text, false);
+            assert_eq!(
+                streaming.len(),
+                settled.len(),
+                "row count changed with the cursor at width {w}"
+            );
+        }
     }
 }

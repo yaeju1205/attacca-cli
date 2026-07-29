@@ -4,23 +4,12 @@
 //! tasks. Side effects are enqueued as [`Action`]s and drained by the event loop.
 
 use crate::app::{Action, App, Focus, SidebarItem};
-use crate::tools::{exec_tool, short};
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
-use std::collections::BTreeMap;
 
 /// Process a keyboard event. Returns `false` on exit request.
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    // y/n tool approval — intercept before focus dispatch
-    if let KeyCode::Char(c) = code {
-        if (c == 'y' || c == 'Y') && app.has_pending_tool() {
-            approve_tool(app, true);
-            return true;
-        }
-        if (c == 'n' || c == 'N') && app.has_pending_tool() {
-            approve_tool(app, false);
-            return true;
-        }
-        if c == '/' && app.focus == Focus::Sidebar {
+    if let KeyCode::Char('/') = code {
+        if app.focus == Focus::Sidebar {
             app.focus = Focus::Chat;
         }
     }
@@ -125,13 +114,11 @@ fn handle_sidebar(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Left => {
             for i in (0..app.sidebar_sel).rev() {
-                if matches!(&app.sidebar_items[i], SidebarItem::ProjectHeader { .. }) {
-                    if let SidebarItem::ProjectHeader { id, .. } = &app.sidebar_items[i].clone()
-                    {
-                        app.expanded_projects.remove(id);
-                        rebuild_sidebar(app);
-                        app.sidebar_sel = i;
-                    }
+                if let SidebarItem::ProjectHeader { id, .. } = &app.sidebar_items[i] {
+                    let id = id.clone();
+                    app.expanded_projects.remove(&id);
+                    app.rebuild_sidebar();
+                    app.sidebar_sel = i;
                     break;
                 }
             }
@@ -156,15 +143,14 @@ fn activate_sidebar_selection(app: &mut App) {
     }
     match app.sidebar_items[app.sidebar_sel].clone() {
         SidebarItem::ProjectHeader {
-            id,
-            ref expanded, ..
+            id, ref expanded, ..
         } => {
             if *expanded {
                 app.expanded_projects.remove(&id);
             } else {
                 app.expanded_projects.insert(id.clone());
             }
-            rebuild_sidebar(app);
+            app.rebuild_sidebar();
         }
         SidebarItem::Session { id, .. } => {
             app.actions.push(Action::Open(id));
@@ -173,51 +159,6 @@ fn activate_sidebar_selection(app: &mut App) {
             app.actions.push(Action::Create);
         }
     }
-}
-
-/// Rebuild the sidebar from the current sessions and project data.
-pub fn rebuild_sidebar(app: &mut App) {
-    let mut project_map: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
-    for (pid, title, id) in &app.sessions {
-        let entry = project_map.entry(pid.clone()).or_insert_with(|| {
-            let name = if pid.is_empty() {
-                "📁 All".into()
-            } else {
-                let known = app.project_names.get(pid).cloned().unwrap_or_default();
-                if known.is_empty() {
-                    format!("📁 {}", short(pid))
-                } else {
-                    format!("📁 {} ({})", known, short(pid))
-                }
-            };
-            (name, vec![])
-        });
-        entry.1.push((title.clone(), id.clone()));
-    }
-    let active_id = app.sid.clone().unwrap_or_default();
-    app.sidebar_items.clear();
-    for (pid, (pname, sess_list)) in &project_map {
-        let expanded = app.expanded_projects.contains(pid.as_str());
-        app.sidebar_items.push(SidebarItem::ProjectHeader {
-            id: pid.clone(),
-            name: pname.clone(),
-            expanded,
-            session_count: sess_list.len(),
-        });
-        if expanded {
-            for (title, id) in sess_list {
-                app.sidebar_items.push(SidebarItem::Session {
-                    title: title.clone(),
-                    id: id.clone(),
-                    active: *id == active_id,
-                });
-            }
-        }
-    }
-    app.sidebar_items.push(SidebarItem::NewSession);
-    let max = app.sidebar_items.len().saturating_sub(1);
-    app.sidebar_sel = app.sidebar_sel.min(max);
-    app.sidebar_scroll = app.sidebar_scroll.min(max.saturating_sub(1));
 }
 
 // ── Chat input ─────────────────────────────────────────────────
@@ -349,75 +290,123 @@ fn dispatch_command(app: &mut App) {
 
     app.input.clear();
     app.input_scroll = usize::MAX;
+    app.autocomplete_suggestions.clear();
+    app.autocomplete_idx = None;
 
     match raw.as_str() {
         "/exit" | "/quit" => {
             app.exit_requested = true;
         }
-        "/help" | "/h" => {
-            show_help(app);
-        }
-        cmd if cmd.starts_with("/login ") => {
-            let key = cmd.trim_start_matches("/login ").trim().to_string();
-            if !key.is_empty() {
-                app.actions.push(Action::Login(key));
-            } else {
-                app.add_msg("sys", "usage: /login <your_api_key>");
-            }
-        }
-        "/credits" | "/me" | "/usage" => {
-            app.actions.push(Action::ShowInfo);
-        }
+        "/help" | "/h" => show_help(app),
+        "/new" | "/n" => app.actions.push(Action::Create),
+        "/cancel" => app.actions.push(Action::Cancel),
+        "/logout" => app.actions.push(Action::Logout),
         "/sessions" => {
             app.focus = Focus::Sidebar;
+            // Focus *and* refresh, so there is a user-driven way to re-read the list that is not a
+            // timer. `turn_events` is per-session, so nothing else pushes the rest of the sidebar.
+            app.actions.push(Action::RefreshSessions);
         }
-        "/new" | "/n" => {
-            app.actions.push(Action::Create);
+        "/login" => {
+            app.push_sys("authorizing — see the terminal");
+            app.login_requested = true;
+        }
+        // Every `.env` in the wild still has an API key in it, so say what changed rather than
+        // silently ignoring the argument.
+        cmd if cmd.starts_with("/login ") => {
+            app.push_sys("attacca-cli no longer takes a key here — /login re-authorizes this node");
+            app.push_sys("set ZYRIS_NODE_TOKEN for a static token instead");
+        }
+        "/credits" | "/me" | "/usage" => app.actions.push(Action::ShowInfo),
+        "/whoami" => match &app.me {
+            Some(me) => {
+                let ident = format!("{} <{}>", me.display_name, me.email);
+                let scopes = if me.scopes.is_empty() {
+                    "none granted".to_string()
+                } else {
+                    me.scopes.join(", ")
+                };
+                app.push_sys(&ident);
+                app.push_sys(&format!("scopes: {scopes}"));
+            }
+            None => app.push_sys("not connected yet"),
+        },
+        // The sidebar can only push what `turn_events` carries, because that is the one stream
+        // `attacca_api` v1 declares. If a deployment announces something account-wide, this is where
+        // it would show up — the announced tool list is never compared against the crate's
+        // declaration, so a newer server may offer more than `zyris-attacca` knows about.
+        "/tools" => match app.slot.get() {
+            Some(live) => {
+                let lines: Vec<String> = live
+                    .conn
+                    .peer_descriptors()
+                    .iter()
+                    .flat_map(|cap| {
+                        std::iter::once(format!("{} v{}", cap.name, cap.version)).chain(
+                            cap.tools
+                                .iter()
+                                .map(|t| format!("  {} ({:?})", t.name, t.transfer)),
+                        )
+                    })
+                    .collect();
+                for line in lines {
+                    app.push_sys(&line);
+                }
+            }
+            None => app.push_sys("not connected yet"),
+        },
+        other if other.starts_with('/') => {
+            app.push_sys(&format!("unknown command: {other}"));
         }
         _ => {
-            // Regular message
-            app.add_msg("user", &raw);
-            if app.transport.key.is_empty() {
-                app.add_msg("sys", "no API key — set ATTACCA_API_KEY");
-            } else {
-                app.actions.push(Action::Send(raw));
-            }
+            // Regular message: echoed optimistically, then settled by its durable event.
+            app.chat.push(crate::app::MsgKind::User, &raw);
+            app.actions.push(Action::Send(raw));
         }
     }
 }
 
 fn show_help(app: &mut App) {
-    app.add_msg("sys", "── Commands ──────────────────────────");
-    app.add_msg("sys", "  /exit       Exit the program");
-    app.add_msg("sys", "  /help       Show this help");
-    app.add_msg("sys", "  /new        Create a new session");
-    app.add_msg("sys", "  /login KEY  Set your API key");
-    app.add_msg("sys", "  /credits    Show account/session info");
-    app.add_msg("sys", "  /me         Same as /credits");
-    app.add_msg("sys", "  /usage      Show session usage details");
-    app.add_msg("sys", "  /sessions   Toggle sidebar focus");
-    app.add_msg("sys", "");
-    app.add_msg("sys", "── Keys ─────────────────────────────");
-    app.add_msg("sys", "  Enter      Send message");
-    app.add_msg("sys", "  Shift+Enter Newline (Alt+Enter, Ctrl+J too)");
-    app.add_msg("sys", "  Tab        Focus sidebar / autocomplete");
-    app.add_msg("sys", "  ↑↓         Scroll chat history");
-    app.add_msg("sys", "  y/n        Approve/skip tool calls");
-    app.add_msg("sys", "  Ctrl+C     Exit");
-    app.add_msg("sys", "  Ctrl+↑/↓  Scroll input");
+    for line in [
+        "── Commands ──────────────────────────",
+        "  /exit       Exit the program",
+        "  /help       Show this help",
+        "  /new        Create a new session",
+        "  /cancel     Stop the running turn",
+        "  /login      Authorize this node again",
+        "  /logout     Forget this node's credential",
+        "  /whoami     Show identity and granted scopes",
+        "  /usage      Show account and session usage",
+        "  /tools      What the server announces",
+        "  /sessions   Focus the sidebar and refresh it",
+        "",
+        "── Keys ─────────────────────────────",
+        "  Enter       Send message",
+        "  Shift+Enter Newline (Alt+Enter, Ctrl+J too)",
+        "  Tab         Focus sidebar / autocomplete",
+        "  ↑↓          Scroll chat history",
+        "  Ctrl+↑/↓    Scroll input",
+        "  Ctrl+C      Exit",
+    ] {
+        app.push_sys(line);
+    }
 }
 
 // ── Autocomplete ───────────────────────────────────────────────
 
+/// What the popup completes. `/quit`, `/h`, `/n`, `/credits` and `/me` resolve in
+/// [`dispatch_command`] but stay out of here — the popup is a fixed 28-column box, and five
+/// near-duplicate entries would fill it with noise.
 const SLASH_COMMANDS: &[&str] = &[
-    "/exit", "/help", "/sessions", "/new", "/login", "/credits", "/me", "/usage",
+    "/help", "/exit", "/new", "/sessions", "/cancel", "/login", "/logout", "/whoami", "/usage",
+    "/tools",
 ];
 
 fn update_autocomplete(app: &mut App) {
     app.autocomplete_suggestions.clear();
     app.autocomplete_idx = None;
     let trimmed = app.input.trim();
-    if trimmed.starts_with('/') && !trimmed.is_empty() && trimmed.len() > 1 {
+    if trimmed.starts_with('/') && trimmed.len() > 1 {
         for cmd in SLASH_COMMANDS {
             if cmd.starts_with(trimmed) {
                 app.autocomplete_suggestions.push(cmd.to_string());
@@ -431,43 +420,10 @@ fn cycle_autocomplete(app: &mut App) {
     if n == 0 {
         return;
     }
-    let next = app
-        .autocomplete_idx
-        .map(|i| (i + 1) % n)
-        .unwrap_or(0);
+    let next = app.autocomplete_idx.map(|i| (i + 1) % n).unwrap_or(0);
     app.autocomplete_idx = Some(next);
     if let Some(cmd) = app.autocomplete_suggestions.get(next) {
         app.input = cmd.clone();
         app.input.push(' ');
-    }
-}
-
-// ── Tool approval ──────────────────────────────────────────────
-
-/// Execute a tool (or skip it) and queue follow-up actions.
-///
-/// Called synchronously from the keyboard handler. The tool is run inline,
-/// its result is shown immediately, and a background poll is queued via
-/// [`Action::ToolResult`].
-fn approve_tool(app: &mut App, yes: bool) {
-    let idx = app
-        .msgs
-        .iter()
-        .rposition(|m| m.raw.is_some() && !m.done);
-    let Some(i) = idx else {
-        return;
-    };
-    let json = app.msgs[i].raw.take().unwrap_or_default();
-    app.msgs[i].done = true;
-
-    let result = if yes {
-        exec_tool(&json)
-    } else {
-        "skipped".into()
-    };
-    app.add_msg("result", &result);
-
-    if yes && app.sid.is_some() {
-        app.actions.push(Action::ToolResult(result));
     }
 }

@@ -9,7 +9,7 @@ name = "attacca"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 ratatui = "0.28"
 crossterm = "0.28"
@@ -17,3 +17,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dotenvy = "0.15"
 unicode-width = "0.1"
+zyris = { git = "https://github.com/attacca-cc/zyris", version = "0.1.0", features = ["enroll"] }
+zyris-attacca = { git = "https://github.com/attacca-cc/zyris", version = "0.1.0" }
+zyris-caps = { git = "https://github.com/attacca-cc/zyris", version = "0.1.0" }
+futures-util = "0.3.33"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+rustls = { version = "0.23.42", features = ["aws-lc-rs"] }
+
+[dev-dependencies]
+zyris = { git = "https://github.com/attacca-cc/zyris", features = ["testing"] }
+
+# Build against the working copy of zyris next door. Required while the `attacca_api`
+# usage tool is unreleased, and convenient whenever both repos move together. A clean
+# checkout without a sibling `../zyris` cannot resolve this — drop the section to build
+# purely from git.
+[patch."https://github.com/attacca-cc/zyris"]
+zyris = { path = "../zyris/crates/zyris" }
+zyris-attacca = { path = "../zyris/crates/zyris-attacca" }
+zyris-caps = { path = "../zyris/crates/zyris-caps" }
