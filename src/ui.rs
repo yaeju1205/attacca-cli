@@ -179,6 +179,15 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
     if lines.is_empty() {
         lines.push(Line::from(vec![Span::styled(" enter:send · tab:sessions · y/n:tool · q:quit", Style::new().fg(DIM))]));
+    } else if app.busy {
+        // show loading indicator in chat
+        let last_role = app.msgs.last().map(|m| m.role.as_str()).unwrap_or("");
+        if last_role == "user" {
+            lines.push(Line::from(vec![
+                Span::styled(" ◉ ", Style::new().fg(TOOL).add_modifier(Modifier::BOLD)),
+                Span::styled("thinking…", Style::new().fg(DIM)),
+            ]));
+        }
     }
 
     let max_vis = area.height.saturating_sub(1) as usize;

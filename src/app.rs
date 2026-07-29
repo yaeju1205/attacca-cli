@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
@@ -17,7 +18,6 @@ pub struct Msg {
     pub done: bool,
 }
 
-/// A flattened sidebar item for rendering.
 #[derive(Clone, Debug)]
 pub enum SidebarItem {
     ProjectHeader { id: String, name: String, expanded: bool, session_count: usize },
@@ -37,9 +37,10 @@ pub struct App {
     pub sel: usize,
     pub show_sidebar: bool,
     pub first: bool,
-    // raw data
     pub sessions: Vec<(String, String, String)>, // (project_id, title, id)
     expanded_projects: std::collections::HashSet<String>,
+    project_names: HashMap<String, String>,        // project_id → name
+    pending_msg: Option<String>,                   // queued message to send
 }
 
 impl App {
@@ -58,6 +59,8 @@ impl App {
             first: true,
             sessions: vec![],
             expanded_projects: std::collections::HashSet::new(),
+            project_names: HashMap::new(),
+            pending_msg: None,
         }
     }
 
@@ -71,9 +74,18 @@ impl App {
         };
         term.clear().ok();
         self.load_sessions().await;
+        self.load_projects().await;
         self.add("sys", "attacca — enter:send  tab:sidebar  y/n:tool  q:quit");
         loop {
+            // draw frame first
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
+
+            // process queued send — this lets the spinner show first
+            if let Some(msg) = self.pending_msg.take() {
+                self.send_inner(msg).await;
+                continue;
+            }
+
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
@@ -107,13 +119,21 @@ impl App {
         self.scroll = usize::MAX;
     }
 
-    /// Rebuild flat sidebar_items from raw sessions + expand state.
     pub fn rebuild_sidebar(&mut self) {
         use std::collections::BTreeMap;
         let mut project_map: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
         for (pid, title, id) in &self.sessions {
             let entry = project_map.entry(pid.clone()).or_insert_with(|| {
-                let name = if pid.is_empty() { "📁 All".into() } else { format!("📁 {}", short(pid)) };
+                let name = if pid.is_empty() {
+                    "📁 All".into()
+                } else {
+                    let known = self.project_names.get(pid).cloned().unwrap_or_default();
+                    if known.is_empty() {
+                        format!("📁 {}", short(pid))
+                    } else {
+                        format!("📁 {} ({})", known, short(pid))
+                    }
+                };
                 (name, vec![])
             });
             entry.1.push((title.clone(), id.clone()));
@@ -151,11 +171,8 @@ impl App {
                     if self.sel < self.sidebar_items.len() {
                         match self.sidebar_items[self.sel].clone() {
                             SidebarItem::ProjectHeader { id, ref expanded, .. } => {
-                                if *expanded {
-                                    self.expanded_projects.remove(&id);
-                                } else {
-                                    self.expanded_projects.insert(id.clone());
-                                }
+                                if *expanded { self.expanded_projects.remove(&id); }
+                                else { self.expanded_projects.insert(id.clone()); }
                                 self.rebuild_sidebar();
                             }
                             SidebarItem::Session { id, .. } => {
@@ -194,7 +211,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let m = self.input.trim().to_string();
-                    if !m.is_empty() { self.input.clear(); self.send(m).await; }
+                    if !m.is_empty() {
+                        self.input.clear();
+                        self.busy = true;
+                        self.pending_msg = Some(m); // queue, don't await — let run() draw first
+                    }
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true).await,
                 KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false).await,
@@ -218,6 +239,19 @@ impl App {
 
     // ── API ──
 
+    pub async fn load_projects(&mut self) {
+        if let Ok(body) = self.api.get("projects").await {
+            if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&body) {
+                for p in &arr {
+                    if let (Some(id), Some(name)) = (p["id"].as_str(), p["name"].as_str()) {
+                        self.project_names.insert(id.to_string(), name.to_string());
+                    }
+                }
+            }
+        }
+        self.rebuild_sidebar();
+    }
+
     pub async fn load_sessions(&mut self) {
         if self.api.key.is_empty() { return; }
         match self.api.get("sessions").await {
@@ -232,13 +266,11 @@ impl App {
                     }).collect();
                     if !self.sessions.is_empty() {
                         let first_pid = self.sessions[0].0.clone();
-                        if !first_pid.is_empty() {
-                            self.expanded_projects.insert(first_pid);
-                        }
+                        if !first_pid.is_empty() { self.expanded_projects.insert(first_pid); }
                     }
                     self.expanded_projects.insert(String::new());
                 } else {
-                    self.add("sys", &format!("sessions: unexpected: {}", body.chars().take(80).collect::<String>()));
+                    self.add("sys", &format!("sessions: parse: {}", body.chars().take(80).collect::<String>()));
                 }
             }
             Err((c, b)) => {
@@ -295,19 +327,22 @@ impl App {
         self.show_sidebar = false;
     }
 
-    // ── Chat ──
+    // ── Send (runs after a draw cycle so spinner shows) ──
 
-    async fn send(&mut self, raw: String) {
+    async fn send_inner(&mut self, raw: String) {
+        // commands
         match raw.as_str() {
             "/q" | "/quit" | "/exit" => std::process::exit(0),
-            "/h" | "/help" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); return; }
-            "/sessions" | "/s" => { self.load_sessions().await; self.show_sidebar = true; return; }
-            "/new" | "/n" => { self.create().await; return; }
+            "/h" | "/help" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); self.busy = false; return; }
+            "/sessions" | "/s" => { self.load_sessions().await; self.show_sidebar = true; self.busy = false; return; }
+            "/new" | "/n" => { self.create().await; self.busy = false; return; }
             _ => {}
         }
-        if self.api.key.is_empty() { self.add("sys", "no API key — set ATTACCA_API_KEY"); return; }
+
+        if self.api.key.is_empty() { self.add("sys", "no API key — set ATTACCA_API_KEY"); self.busy = false; return; }
+
         self.add("user", &raw);
-        self.busy = true;
+
         if self.sid.is_none() {
             match self.api.post("sessions", &serde_json::json!({"title": "attacca-cli"})).await {
                 Ok(body) => {
@@ -319,11 +354,14 @@ impl App {
                 Err((c, b)) => { self.add("sys", &format!("session: HTTP {c}: {}", b.chars().take(100).collect::<String>())); self.busy = false; return; }
             }
         }
+
         let sid = self.sid.as_ref().unwrap().clone();
         let payload = if self.first { self.first = false; format!("{PROTOCOL}\n\n---\n{raw}") } else { raw };
+
         if let Err((c, b)) = self.api.post(&format!("/v1/sessions/{sid}/messages"), &serde_json::json!({"message": payload, "timezone": "Asia/Seoul"})).await {
             self.add("sys", &format!("send: HTTP {c}: {}", b.chars().take(100).collect::<String>())); self.busy = false; return;
         }
+
         loop {
             match self.api.get(&format!("/v1/sessions/{sid}")).await {
                 Ok(body) => { if let Ok(v) = serde_json::from_str::<Value>(&body) { if !v["running"].as_bool().unwrap_or(true) { break; } } }
@@ -331,6 +369,7 @@ impl App {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+
         match self.api.get(&format!("/v1/sessions/{sid}/messages?after={}", self.cur)).await {
             Ok(body) => {
                 if let Ok(msgs) = serde_json::from_str::<Vec<Value>>(&body) {
