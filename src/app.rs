@@ -280,6 +280,13 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
+        // y/n for tool approval — ALWAYS works, regardless of focus
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => { self.approve(true); return true; }
+            KeyCode::Char('n') | KeyCode::Char('N') => { self.approve(false); return true; }
+            _ => {}
+        }
+
         // Tab: cycle autocomplete suggestions if any, else toggle focus
         if code == KeyCode::Tab {
             if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
@@ -399,8 +406,6 @@ impl App {
                     self.actions.push(Action::Send(m));
                 }
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true),
-            KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false),
             KeyCode::Char(c) => {
                 self.input.push(c);
                 self.update_autocomplete();
