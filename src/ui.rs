@@ -76,7 +76,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let sel = app.sel;
-    let items: Vec<ListItem> = app.sidebar_items.iter().enumerate().map(|(i, item)| {
+    let scroll = app.sidebar_scroll;
+    let max_vis = area.height.saturating_sub(4) as usize;
+    let items: Vec<ListItem> = app.sidebar_items.iter().enumerate()
+        .skip(scroll)
+        .take(max_vis)
+        .map(|(i, item)| {
         let highlight = i == sel;
         match item {
             SidebarItem::ProjectHeader { name, expanded, session_count, .. } => {
