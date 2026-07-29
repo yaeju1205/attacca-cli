@@ -269,19 +269,26 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.at_end = true;
             app.scroll = 0;
         }
-        // Enter with ALT modifier → insert newline (Alt+Enter = ESC+\r,
-        // works on ALL terminals — the only reliable modifier combo for Enter).
-        // Ctrl+Enter on Kitty-protocol terminals → Enter with CONTROL.
+        // ── Newline insertion (Enter + any modifier or Ctrl+J) ──
+        //
+        // Kitty keyboard protocol (enabled in event.rs via
+        // PushKeyboardEnhancementFlags) makes the terminal report
+        // Shift+Enter as \x1B[13;2u → KeyCode::Enter + SHIFT.
+        //
+        // On terminals without Kitty support we fall back to:
+        //   - Alt+Enter → ESC+\r → KeyCode::Enter + ALT
+        //   - Ctrl+J    → 0x0A    → KeyCode::Char('j') + CTRL
         KeyCode::Enter
-            if modifiers.contains(KeyModifiers::ALT)
+            if modifiers.contains(KeyModifiers::SHIFT)
+                || modifiers.contains(KeyModifiers::ALT)
                 || modifiers.contains(KeyModifiers::CONTROL) =>
         {
             app.input.push('\n');
             update_autocomplete(app);
         }
-        // Ctrl+J (0x0A, LF) → insert newline.
-        // On basic terminals Ctrl+Enter is the same as Ctrl+J, so this
-        // catches "Ctrl+Enter" on gnome-terminal, VSCode, iTerm2, etc.
+        // Ctrl+J (0x0A = LF) → newline fallback for terminals without Kitty protocol.
+        // In raw mode the terminal sends 0x0A as Ctrl+J, which is equivalent to
+        // what Ctrl+Enter produces on gnome-terminal, VSCode, iTerm2, etc.
         KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => {
             app.input.push('\n');
             update_autocomplete(app);
@@ -367,7 +374,7 @@ fn show_help(app: &mut App) {
     app.add_msg("sys", "");
     app.add_msg("sys", "── Keys ─────────────────────────────");
     app.add_msg("sys", "  Enter      Send message");
-    app.add_msg("sys", "  Alt+Enter  Newline (Ctrl+J also works)");
+    app.add_msg("sys", "  Shift+Enter Newline (Alt+Enter, Ctrl+J too)");
     app.add_msg("sys", "  Tab        Focus sidebar / autocomplete");
     app.add_msg("sys", "  ↑↓         Scroll chat history");
     app.add_msg("sys", "  y/n        Approve/skip tool calls");

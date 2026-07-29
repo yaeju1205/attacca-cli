@@ -9,7 +9,10 @@ use crate::bg;
 use crate::handler;
 use crate::tools::parse_tools;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use std::io;
@@ -25,8 +28,15 @@ pub async fn run(app: &mut App) {
     }
 
     let mut stdout = io::stdout();
-    if crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)
-        .is_err()
+    if crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        ),
+    )
+    .is_err()
     {
         eprintln!("alt screen failed");
         terminal::disable_raw_mode().ok();
@@ -48,7 +58,7 @@ pub async fn run(app: &mut App) {
     load_initial_data(app).await;
     app.add_msg(
         "sys",
-        "── attacca ── enter:send  alt+enter:newline  tab:autocomplete  y/n:tool ──",
+        "── attacca ── enter:send  shift+enter:newline  tab:autocomplete  y/n:tool ──",
     );
 
     // ── Main loop ──
@@ -82,13 +92,17 @@ pub async fn run(app: &mut App) {
 
     // ── Cleanup ──
     terminal::disable_raw_mode().ok();
-    let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+    let _ = crossterm::execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
+    );
 }
 
 // ── Initial data loading ───────────────────────────────────────
 
 async fn load_initial_data(app: &mut App) {
-    // Load sessions, projects, and user info concurrently
     let (sessions, projects, (user_name, _email, user_plan, user_credits)) = tokio::join!(
         api::fetch_sessions(&app.transport),
         api::fetch_projects(&app.transport),
@@ -104,7 +118,6 @@ async fn load_initial_data(app: &mut App) {
     app.user_plan = user_plan;
     app.user_credits = user_credits;
 
-    // Auto-expand first project + "All"
     if let Some(first) = app.sessions.first() {
         if !first.0.is_empty() {
             app.expanded_projects.insert(first.0.clone());
@@ -133,7 +146,6 @@ fn drain_bg_events(app: &mut App) {
                                 app.upsert_msg(m.cursor, "agent", &clean);
                             }
                             for j in tools {
-                                // Safe tools auto-execute without y/n approval
                                 if crate::tools::is_safe_tool(&j) {
                                     let result = crate::tools::exec_tool(&j);
                                     app.add_msg("result", &result);
@@ -166,7 +178,6 @@ fn drain_bg_events(app: &mut App) {
                 if app.sid.as_deref() == Some(&sid) || app.sid.is_none() {
                     app.dec_busy();
                 }
-                // Auto-refresh usage after the session finishes
                 if !app.busy() && app.sid.is_some() {
                     let transport = app.transport.clone();
                     let tx = app.bg_tx.clone();
@@ -236,7 +247,6 @@ fn drain_actions(app: &mut App) {
                 app.at_end = true;
                 app.add_msg("sys", &format!("loading {}", crate::tools::short(&sid)));
 
-                // Set project name from sessions
                 app.current_project_name = app
                     .sessions
                     .iter()
