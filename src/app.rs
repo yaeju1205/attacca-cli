@@ -102,10 +102,11 @@ impl App {
         self.add("sys", "attacca — enter:send  tab:autocomplete  y/n:tool  /exit");
 
         loop {
-            if term.draw(|f| ui::draw(f, self)).is_err() { break; }
+            // draw (use try_draw — non-blocking render)
+            let _ = term.draw(|f| ui::draw(f, self));
             if self.exit_requested { break; }
 
-            // drain bg events (poll results)
+            // drain bg events (poll results) — non-blocking
             while let Ok(ev) = self.bg_rx.try_recv() {
                 match ev {
                     BgEvent::NewMsgs { msgs, new_cur } => {
@@ -135,8 +136,8 @@ impl App {
                 }
             }
 
-            // process one action at a time
-            if !self.busy && !self.actions.is_empty() {
+            // drain action queue — don't await, just dispatch to bg
+            while !self.busy && !self.actions.is_empty() {
                 let action = self.actions.remove(0);
                 self.busy = true;
                 match action {
@@ -144,11 +145,11 @@ impl App {
                     Action::Open(sid) => self.open_async(&sid).await,
                     Action::Create => self.create_async().await,
                 }
-                continue;
+                // don't continue — let event poll happen
             }
 
-            // poll keyboard & mouse
-            match event::poll(Duration::from_millis(100)) {
+            // poll events — shorter timeout for responsive feel
+            match event::poll(Duration::from_millis(16)) { // ~60fps
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
                         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
@@ -160,7 +161,6 @@ impl App {
                     Ok(Event::Mouse(m)) => {
                         match m.kind {
                             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                // columns 0-27 = sidebar, 28+ = chat
                                 if m.column < 30 {
                                     self.focus = Focus::Sidebar;
                                     let list_row = m.row.saturating_sub(2) as usize;
@@ -183,14 +183,8 @@ impl App {
                                     if self.sel >= self.sidebar_scroll + max_vis {
                                         self.sel = self.sidebar_scroll + max_vis - 1;
                                     }
-                                } else {
-                                    // chat scroll — 3 lines per tick
-                                    if self.at_end {
-                                        self.at_end = false;
-                                        self.scroll = S;
-                                    } else {
-                                        self.scroll = self.scroll.saturating_add(S);
-                                    }
+                                } else if !self.at_end {
+                                    self.scroll = self.scroll.saturating_add(S);
                                 }
                             }
                             MouseEventKind::ScrollUp => {
@@ -201,14 +195,11 @@ impl App {
                                         self.sel = self.sidebar_scroll + 11;
                                     }
                                 } else {
-                                    // chat scroll — 3 lines per tick
-                                    if self.at_end || self.scroll > 0 {
-                                        if self.at_end {
-                                            self.at_end = false;
-                                            self.scroll = 0;
-                                        } else {
-                                            self.scroll = self.scroll.saturating_sub(S);
-                                        }
+                                    if self.at_end {
+                                        self.at_end = false;
+                                        self.scroll = 0;
+                                    } else if self.scroll > 0 {
+                                        self.scroll = self.scroll.saturating_sub(S);
                                     }
                                 }
                             }
