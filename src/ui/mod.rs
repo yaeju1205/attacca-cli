@@ -304,32 +304,31 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // ── 2. Scroll positioning ──
+    // ── 2. Pick the visible slice ──
     //
-    // Show the portion of lines that fits in the available height.
-    // Each logical line may wrap to several visual lines (long text),
-    // so we show FEWER logical lines than visual rows.
+    // `at_end=true`  → show the bottom portion (latest messages)
+    // `at_end=false` → scrolled up: show older portion
     //
-    // Formula: how many LOGICAL lines fit = (visual_rows / 2) rounded up
-    // so even heavy wrapping (~2×) still fits without clipping.
-    //
-    // at_end=true  → show the bottom portion (latest messages)
-    // at_end=false → scrolled up: show older portion by app.scroll
+    // Show at most `max_rows` logical lines; any excess wraps within the
+    // Paragraph widget and may be clipped — that's expected scroll behaviour.
 
     let total = lines.len();
-    let visual_rows = area.height.saturating_sub(1) as usize;
-    let cap = (visual_rows / 2).max(3); // logical lines we can safely show
+    let max_rows = area.height.saturating_sub(1) as usize;
 
-    let scroll_off = if app.at_end || total <= cap {
-        total.saturating_sub(cap)
+    let skip = if app.at_end || total <= max_rows {
+        total.saturating_sub(max_rows) // show last max_rows lines
     } else {
-        total.saturating_sub(cap).saturating_sub(app.scroll)
+        total.saturating_sub(max_rows).saturating_sub(app.scroll) // scrolled up
     };
+
+    // Drop lines before `skip` so Paragraph only gets what we want to show
+    if skip > 0 {
+        let _ = lines.drain(..skip.min(total));
+    }
 
     // ── 3. Render ──
     f.render_widget(
         Paragraph::new(Text::from(lines))
-            .scroll((scroll_off as u16, 0))
             .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
