@@ -18,6 +18,7 @@ pub struct Msg {
     pub text: String,
     pub raw: Option<String>,
     pub done: bool,
+    pub cursor: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -145,14 +146,14 @@ impl App {
                             match m.role.as_str() {
                                 "assistant" => {
                                     let (clean, tools) = parse_tools(&m.text);
-                                    if !clean.is_empty() { self.add("agent", &clean); }
+                                    if !clean.is_empty() { self.upsert_msg(m.cursor, "agent", &clean); }
                                     for j in tools { self.add_tool(&j); }
                                 }
                                 "user" => {
-                                    if !m.text.is_empty() { self.add("user", &m.text); }
+                                    if !m.text.is_empty() { self.upsert_msg(m.cursor, "user", &m.text); }
                                 }
                                 _ => {
-                                    if !m.text.is_empty() { self.add("sys", &m.text); }
+                                    if !m.text.is_empty() { self.upsert_msg(m.cursor, "sys", &m.text); }
                                 }
                             }
                         }
@@ -273,9 +274,24 @@ impl App {
 
     fn add(&mut self, role: &str, text: &str) {
         if text.trim().is_empty() { return; }
-        self.msgs.push(Msg { role: role.into(), text: text.into(), raw: None, done: false });
+        self.msgs.push(Msg { role: role.into(), text: text.into(), raw: None, done: false, cursor: 0 });
         if self.at_end {
             self.scroll = 0; // doesn't matter — at_end overrides
+        }
+    }
+
+    fn upsert_msg(&mut self, cursor: i64, role: &str, text: &str) {
+        // Find existing message with same cursor → update in place (streaming)
+        if cursor > 0 {
+            if let Some(existing) = self.msgs.iter_mut().find(|m| m.cursor == cursor) {
+                existing.text = text.to_string();
+                return;
+            }
+        }
+        // No existing → append
+        self.msgs.push(Msg { role: role.into(), text: text.into(), raw: None, done: false, cursor });
+        if self.at_end {
+            self.scroll = 0;
         }
     }
 
@@ -285,7 +301,7 @@ impl App {
         let args = v.get("args").and_then(|a| a.as_object())
             .map(|o| o.iter().filter_map(|(k, vv)| Some(format!("{k}={}", vv.as_str()?))).collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
-        self.msgs.push(Msg { role: "tool".into(), text: format!("◆ {tool} {args}"), raw: Some(json.into()), done: false });
+        self.msgs.push(Msg { role: "tool".into(), text: format!("◆ {tool} {args}"), raw: Some(json.into()), done: false, cursor: 0 });
         if self.at_end { self.scroll = 0; }
     }
 
@@ -564,7 +580,7 @@ impl App {
         tokio::spawn(async move {
             let name = api.whoami().await;
             let _ = tx.send(BgEvent::NewMsgs {
-                msgs: vec![Msg { role: "sys".into(), text: format!("logged in — {name}"), raw: None, done: true }],
+                msgs: vec![Msg { role: "sys".into(), text: format!("logged in — {name}"), raw: None, done: true, cursor: 0 }],
                 new_cur: 0,
             });
             let _ = tx.send(BgEvent::Done);
@@ -603,10 +619,11 @@ impl App {
                         if let Some(c) = m["cursor"].as_i64() { if c > new_cur { new_cur = c; } }
                         let role = m["role"].as_str().unwrap_or("");
                         let text = m["text"].as_str().unwrap_or("");
+                        let cursor = m["cursor"].as_i64().unwrap_or(0);
                         if role == "assistant" || role == "user" {
                             let (clean, _) = parse_tools(text);
                             if !clean.is_empty() {
-                                new_msgs.push(Msg { role: role.into(), text: clean, raw: None, done: false });
+                                new_msgs.push(Msg { role: role.into(), text: clean, raw: None, done: false, cursor });
                             }
                         }
                     }
@@ -641,7 +658,7 @@ impl App {
                         if let Some(id) = v["id"].as_str() {
                             let _ = tx.send(BgEvent::SessionCreated(id.to_string()));
                             let _ = tx.send(BgEvent::NewMsgs {
-                                msgs: vec![Msg { role: "sys".into(), text: format!("new session {}", short(id)), raw: None, done: true }],
+                                msgs: vec![Msg { role: "sys".into(), text: format!("new session {}", short(id)), raw: None, done: true, cursor: 0 }],
                                 new_cur: 0,
                             });
                         }
@@ -649,7 +666,7 @@ impl App {
                 }
                 Err((c, b)) => {
                     let _ = tx.send(BgEvent::NewMsgs {
-                        msgs: vec![Msg { role: "sys".into(), text: format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true }],
+                        msgs: vec![Msg { role: "sys".into(), text: format!("create: HTTP {c}: {}", b.chars().take(100).collect::<String>()), raw: None, done: true, cursor: 0 }],
                         new_cur: 0,
                     });
                 }
@@ -707,7 +724,8 @@ impl App {
                                 if let Some(c) = m["cursor"].as_i64() { max_cursor = max_cursor.max(c); }
                                 if m["role"].as_str() == Some("assistant") {
                                     if let Some(text) = m["text"].as_str() {
-                                        new_msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                        let cursor = m["cursor"].as_i64().unwrap_or(0);
+                                        new_msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false, cursor });
                                     }
                                 }
                             }
@@ -743,7 +761,7 @@ impl App {
                             if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
                             if m["role"].as_str() == Some("assistant") {
                                 if let Some(text) = m["text"].as_str() {
-                                    msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                    msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false, cursor: m["cursor"].as_i64().unwrap_or(0) });
                                 }
                             }
                         }
@@ -786,7 +804,7 @@ impl App {
                                 if let Some(c) = m["cursor"].as_i64() { max_cursor = max_cursor.max(c); }
                                 if m["role"].as_str() == Some("assistant") {
                                     if let Some(text) = m["text"].as_str() {
-                                        msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                        msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false, cursor: m["cursor"].as_i64().unwrap_or(0) });
                                     }
                                 }
                             }
@@ -818,7 +836,7 @@ impl App {
                             if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
                             if m["role"].as_str() == Some("assistant") {
                                 if let Some(text) = m["text"].as_str() {
-                                    msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                    msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false, cursor: m["cursor"].as_i64().unwrap_or(0) });
                                 }
                             }
                         }
