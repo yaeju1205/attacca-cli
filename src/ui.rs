@@ -263,7 +263,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let off = if app.at_end || total <= max_vis {
         total.saturating_sub(max_vis)
     } else {
-        app.scroll.min(total.saturating_sub(max_vis))
+        total.saturating_sub(max_vis).saturating_sub(app.scroll)
     };
 
     f.render_widget(

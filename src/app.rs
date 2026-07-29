@@ -183,8 +183,16 @@ impl App {
                                     if self.sel >= self.sidebar_scroll + max_vis {
                                         self.sel = self.sidebar_scroll + max_vis - 1;
                                     }
-                                } else if !self.at_end {
-                                    self.scroll = self.scroll.saturating_add(S);
+                                } else {
+                                    // scroll down = go toward bottom
+                                    if !self.at_end {
+                                        if self.scroll > S {
+                                            self.scroll -= S;
+                                        } else {
+                                            self.at_end = true;
+                                            self.scroll = 0;
+                                        }
+                                    }
                                 }
                             }
                             MouseEventKind::ScrollUp => {
@@ -195,11 +203,12 @@ impl App {
                                         self.sel = self.sidebar_scroll + 11;
                                     }
                                 } else {
+                                    // scroll up = scroll away from bottom
                                     if self.at_end {
                                         self.at_end = false;
-                                        self.scroll = 0;
-                                    } else if self.scroll > 0 {
-                                        self.scroll = self.scroll.saturating_sub(S);
+                                        self.scroll = S;
+                                    } else {
+                                        self.scroll = self.scroll.saturating_add(S);
                                     }
                                 }
                             }
@@ -325,34 +334,45 @@ impl App {
 
     fn handle_chat(&mut self, code: KeyCode) -> bool {
         const SCROLL_SPEED: usize = 3;
+        // scroll = how many lines above the bottom we've scrolled
         match code {
             KeyCode::Up => {
                 if self.at_end {
                     self.at_end = false;
-                    self.scroll = 0;
-                } else if self.scroll > 0 {
-                    self.scroll = self.scroll.saturating_sub(SCROLL_SPEED);
+                    self.scroll = SCROLL_SPEED;
+                } else {
+                    self.scroll = self.scroll.saturating_add(SCROLL_SPEED);
                 }
             }
             KeyCode::Down => {
                 if !self.at_end {
-                    self.scroll = self.scroll.saturating_add(SCROLL_SPEED);
+                    if self.scroll > SCROLL_SPEED {
+                        self.scroll = self.scroll.saturating_sub(SCROLL_SPEED);
+                    } else {
+                        self.at_end = true;
+                        self.scroll = 0;
+                    }
                 }
             }
             KeyCode::PageUp => {
                 if self.at_end {
                     self.at_end = false;
-                    self.scroll = 0;
+                    self.scroll = 10;
                 } else {
-                    self.scroll = self.scroll.saturating_sub(10);
+                    self.scroll = self.scroll.saturating_add(10);
                 }
             }
             KeyCode::PageDown => {
                 if !self.at_end {
-                    self.scroll = self.scroll.saturating_add(10);
+                    if self.scroll > 10 {
+                        self.scroll = self.scroll.saturating_sub(10);
+                    } else {
+                        self.at_end = true;
+                        self.scroll = 0;
+                    }
                 }
             }
-            KeyCode::Home => { self.at_end = false; self.scroll = 0; }
+            KeyCode::Home => { self.at_end = false; self.scroll = 9999; }
             KeyCode::End => { self.at_end = true; self.scroll = 0; }
             KeyCode::Enter => {
                 let m = self.input.trim().to_string();
