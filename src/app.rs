@@ -2,7 +2,8 @@ use crate::api::Api;
 use crate::tools::{exec_tool, parse_tools, short, PROTOCOL};
 use crate::ui;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::MouseEventKind;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use serde_json::Value;
@@ -75,7 +76,7 @@ impl App {
     pub async fn run(&mut self) {
         terminal::enable_raw_mode().ok();
         let mut stdout = io::stdout();
-        crossterm::execute!(stdout, EnterAlternateScreen).ok();
+        crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture).ok();
         let mut term = match Terminal::new(ratatui::backend::CrosstermBackend::new(stdout)) {
             Ok(t) => t,
             Err(_) => { eprintln!("term init failed"); return; }
@@ -122,11 +123,38 @@ impl App {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
                         // Ctrl+C → exit
-                        if k.code == KeyCode::Char('c') && k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                        if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                             break;
                         }
                         if (k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat)
                             && !self.handle_key(k.code) { break; }
+                    }
+                    Ok(Event::Mouse(m)) => {
+                        if self.show_sidebar {
+                            let max_vis = 12usize;
+                            match m.kind {
+                                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                    let list_row = m.row.saturating_sub(2) as usize;
+                                    let idx = list_row + self.sidebar_scroll;
+                                    if idx < self.sidebar_items.len() {
+                                        self.sel = idx;
+                                        self.activate_sidebar_selection();
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if self.sidebar_scroll + max_vis < self.sidebar_items.len() {
+                                        self.sidebar_scroll += 3;
+                                        let max = self.sidebar_items.len().saturating_sub(1);
+                                        if self.sel < self.sidebar_scroll { self.sel = self.sidebar_scroll; }
+                                        if self.sel > max { self.sel = max; }
+                                    }
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(3);
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -136,7 +164,7 @@ impl App {
             }
         }
         terminal::disable_raw_mode().ok();
-        crossterm::execute!(io::stdout(), LeaveAlternateScreen).ok();
+        crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture).ok();
     }
 
     fn add(&mut self, role: &str, text: &str) {
@@ -187,38 +215,24 @@ impl App {
         self.sidebar_scroll = 0;
     }
 
-    // ── Key handling: only sets state and pushes actions ──
+    // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
         if self.show_sidebar {
             match code {
                 KeyCode::Tab | KeyCode::Esc => { self.show_sidebar = false; return true; }
                 KeyCode::Up => {
-                    if self.sel > 0 { self.sel -= 1; }
+                    if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); }
                     return true;
                 }
                 KeyCode::Down => {
                     let max = self.sidebar_items.len().saturating_sub(1);
-                    if self.sel < max { self.sel += 1; }
+                    if self.sel < max { self.sel += 1; self.clamp_sidebar_scroll(); }
                     return true;
                 }
                 KeyCode::Enter | KeyCode::Right => {
                     if self.sel < self.sidebar_items.len() {
-                        match self.sidebar_items[self.sel].clone() {
-                            SidebarItem::ProjectHeader { id, ref expanded, .. } => {
-                                if *expanded { self.expanded_projects.remove(&id); }
-                                else { self.expanded_projects.insert(id.clone()); }
-                                self.rebuild_sidebar();
-                            }
-                            SidebarItem::Session { id, .. } => {
-                                self.show_sidebar = false;
-                                self.actions.push(Action::Open(id));
-                            }
-                            SidebarItem::NewSession => {
-                                self.show_sidebar = false;
-                                self.actions.push(Action::Create);
-                            }
-                        }
+                        self.activate_sidebar_selection();
                     }
                     return true;
                 }
@@ -282,7 +296,35 @@ impl App {
         true
     }
 
-    // ── Async operations (run from main loop) ──
+    fn activate_sidebar_selection(&mut self) {
+        if self.sel >= self.sidebar_items.len() { return; }
+        match self.sidebar_items[self.sel].clone() {
+            SidebarItem::ProjectHeader { id, ref expanded, .. } => {
+                if *expanded { self.expanded_projects.remove(&id); }
+                else { self.expanded_projects.insert(id.clone()); }
+                self.rebuild_sidebar();
+            }
+            SidebarItem::Session { id, .. } => {
+                self.show_sidebar = false;
+                self.actions.push(Action::Open(id));
+            }
+            SidebarItem::NewSession => {
+                self.show_sidebar = false;
+                self.actions.push(Action::Create);
+            }
+        }
+    }
+
+    fn clamp_sidebar_scroll(&mut self) {
+        let vis = 12usize;
+        if self.sel < self.sidebar_scroll {
+            self.sidebar_scroll = self.sel;
+        } else if self.sel >= self.sidebar_scroll + vis {
+            self.sidebar_scroll = self.sel.saturating_sub(vis) + 1;
+        }
+    }
+
+    // ── Async operations ──
 
     async fn open_async(&mut self, sid: &str) {
         self.sid = Some(sid.to_string());

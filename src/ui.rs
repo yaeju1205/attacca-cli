@@ -85,10 +85,10 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new("").style(Style::new().bg(SURFACE)), area);
 
-    // subtle left accent border
+    // subtle left accent border — 2px purple line full height
     f.render_widget(
         Paragraph::new("").style(Style::new().bg(ACCENT)),
-        Rect::new(area.x, area.y, 2, 1),
+        Rect::new(area.x, area.y + 1, 2, area.height.saturating_sub(3)),
     );
 
     // header
@@ -104,10 +104,10 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let scroll = app.sidebar_scroll;
     let max_vis = (area.height.saturating_sub(4)) as usize;
     let items: Vec<ListItem> = app.sidebar_items.iter().enumerate()
-        .skip(scroll)
+        .filter(|&(i, _)| i >= scroll)
         .take(max_vis)
-        .map(|(abs_i, item)| {
-            let highlight = abs_i == sel;
+        .map(|(orig_i, item)| {
+            let highlight = orig_i == sel;
             match item {
                 SidebarItem::ProjectHeader { name, expanded, session_count, .. } => {
                     let icon = if *expanded { "▼" } else { "▶" };
