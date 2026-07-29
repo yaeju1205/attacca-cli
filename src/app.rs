@@ -95,6 +95,10 @@ pub struct App {
     pub scroll: usize,
     pub at_end: bool,
     pub input_scroll: usize,
+    /// Max top-row offset for the input box, in wrapped *visual* rows.
+    /// Recomputed each frame in [`crate::ui`] and read by the input scroll
+    /// handler so Ctrl+↑/↓ clamps against wrapped lines, not just `\n` lines.
+    pub input_max_scroll: usize,
 
     // Sidebar
     pub sidebar_items: Vec<SidebarItem>,
@@ -142,6 +146,7 @@ impl App {
             scroll: 0,
             at_end: true,
             input_scroll: 0,
+            input_max_scroll: 0,
             sidebar_items: vec![],
             sidebar_sel: 0,
             sidebar_scroll: 0,

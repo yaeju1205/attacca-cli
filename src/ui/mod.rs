@@ -1,7 +1,9 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, SidebarItem};
@@ -10,7 +12,7 @@ use palette::*;
 mod palette;
 
 /// Top-level draw entry point, called once per frame.
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let a = f.area();
     if a.width < 50 || a.height < 10 {
         return;
@@ -277,7 +279,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // Input box (includes info bar at the top separator)
-fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
+fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
     let chat_focused = app.focus == Focus::Chat;
 
     // Row 0: separator line with session info
@@ -333,53 +335,89 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let segments: Vec<&str> = app.input.split('\n').collect();
-    let total = segments.len();
+    // Reserve the rightmost column for a scrollbar; wrap text into the rest.
+    let scrollbar_area = Rect::new(
+        text_area.x + text_area.width.saturating_sub(1),
+        text_area.y,
+        1,
+        text_area.height,
+    );
+    let text_render_area = Rect::new(
+        text_area.x,
+        text_area.y,
+        text_area.width.saturating_sub(1),
+        text_area.height,
+    );
+    // 3-char left gutter (prompt / continuation indent) shrinks the wrap width.
+    let content_width = (text_render_area.width as usize).saturating_sub(3).max(1);
+    let view = text_render_area.height as usize;
 
-    // Build display: every input line as a separate ratatui Line
-    let mut display: Vec<Line> = Vec::new();
+    // Build display rows, hard-wrapping each logical line into visual rows so
+    // scrolling and the cursor stay correct even without explicit newlines.
+    let segments: Vec<&str> = app.input.split('\n').collect();
+    let seg_count = segments.len();
+    let mut rows: Vec<Line> = Vec::new();
 
     if app.input.is_empty() {
-        display.push(Line::from(vec![
+        rows.push(Line::from(vec![
             prompt,
             Span::styled("type a message…", Style::new().fg(DIM)),
             Span::styled("█", Style::new().fg(P)),
         ]));
     } else {
-        for (i, seg) in segments.iter().enumerate() {
-            let is_last = i == total - 1;
-            let cursor_ch = if is_last { "█" } else { "" };
-            if i == 0 {
-                display.push(Line::from(vec![
-                    prompt.clone(),
-                    Span::raw(seg.to_string()),
-                    Span::styled(cursor_ch, Style::new().fg(P)),
-                ]));
-            } else {
-                display.push(Line::from(vec![
-                    Span::styled("   ", Style::new().fg(DIM)),
-                    Span::raw(seg.to_string()),
-                    Span::styled(cursor_ch, Style::new().fg(P)),
+        let mut first_overall = true;
+        for (si, seg) in segments.iter().enumerate() {
+            let chunks = wrap_chars(seg, content_width);
+            let chunk_count = chunks.len();
+            for (ci, chunk) in chunks.into_iter().enumerate() {
+                let is_last_visual = si == seg_count - 1 && ci == chunk_count - 1;
+                let gutter = if first_overall {
+                    prompt.clone()
+                } else {
+                    Span::styled("   ", Style::new().fg(DIM))
+                };
+                first_overall = false;
+                rows.push(Line::from(vec![
+                    gutter,
+                    Span::raw(chunk),
+                    Span::styled(if is_last_visual { "█" } else { "" }, Style::new().fg(P)),
                 ]));
             }
         }
     }
 
-    // Scroll: Ctrl+↑/↓ for manual, auto-follow at bottom when typing.
-    let max_scroll = total.saturating_sub(3);
-    let scroll_off = if app.input_scroll == usize::MAX || app.input_scroll > max_scroll {
+    // Scroll: Ctrl+↑/↓ for manual, auto-follow the last row when typing.
+    let total_rows = rows.len();
+    let max_scroll = total_rows.saturating_sub(view);
+    app.input_max_scroll = max_scroll;
+    let scroll_off = if app.input_scroll == usize::MAX {
         max_scroll
     } else {
-        app.input_scroll
+        app.input_scroll.min(max_scroll)
     };
 
+    let end = (scroll_off + view).min(total_rows);
+    let visible: Vec<Line> = rows[scroll_off..end].to_vec();
+
     f.render_widget(
-        Paragraph::new(Text::from(display))
-            .scroll((scroll_off as u16, 0))
-            .wrap(Wrap { trim: false })
-            .style(Style::new().bg(BG)),
-        text_area,
+        Paragraph::new(Text::from(visible)).style(Style::new().bg(BG)),
+        text_render_area,
     );
+
+    // Scrollbar indicator (only when the content overflows the 3-row viewport).
+    if total_rows > view {
+        let mut sb_state = ScrollbarState::new(total_rows)
+            .viewport_content_length(view)
+            .position(scroll_off);
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_symbol("█")
+            .track_symbol(Some("│"))
+            .thumb_style(Style::new().fg(P))
+            .track_style(Style::new().fg(BORDER));
+        f.render_stateful_widget(sb, scrollbar_area, &mut sb_state);
+    }
 
     // autocomplete popup
     let suggestions = &app.autocomplete_suggestions;
@@ -417,6 +455,24 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // Helpers
+
+/// Hard-wrap a single logical line into visual rows of at most `width` chars.
+/// An empty line yields one empty row so blank input lines still take a row.
+fn wrap_chars(seg: &str, width: usize) -> Vec<String> {
+    if seg.is_empty() {
+        return vec![String::new()];
+    }
+    let chars: Vec<char> = seg.chars().collect();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + width).min(chars.len());
+        rows.push(chars[i..end].iter().collect());
+        i = end;
+    }
+    rows
+}
+
 fn short(s: &str) -> String {
     s.chars().take(8).collect()
 }

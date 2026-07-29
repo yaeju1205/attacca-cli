@@ -225,25 +225,24 @@ pub fn rebuild_sidebar(app: &mut App) {
 fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     const SCROLL_SPEED: usize = 3;
     match code {
-        // Ctrl+↑/↓: scroll input content when it exceeds 3 lines
+        // Ctrl+↑/↓: scroll the input box by wrapped *visual* rows. The max
+        // offset (`input_max_scroll`) is recomputed each frame in the UI, so
+        // this stays correct for long soft-wrapped lines, not just `\n` lines.
         KeyCode::Up if modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.input_scroll == usize::MAX {
-                let total = app.input.split('\n').count();
-                app.input_scroll = total.saturating_sub(3).saturating_sub(1);
-            } else if app.input_scroll > 0 {
-                app.input_scroll -= 1;
-            }
+            let cur = if app.input_scroll == usize::MAX {
+                app.input_max_scroll
+            } else {
+                app.input_scroll
+            };
+            app.input_scroll = cur.saturating_sub(1);
         }
         KeyCode::Down if modifiers.contains(KeyModifiers::CONTROL) => {
-            let total = app.input.split('\n').count();
-            let max_scroll = total.saturating_sub(3);
-            if app.input_scroll == usize::MAX || app.input_scroll < max_scroll {
-                if app.input_scroll == usize::MAX {
-                    app.input_scroll = max_scroll;
-                } else {
-                    app.input_scroll = app.input_scroll.saturating_add(1);
-                }
-            }
+            let cur = if app.input_scroll == usize::MAX {
+                app.input_max_scroll
+            } else {
+                app.input_scroll
+            };
+            app.input_scroll = cur.saturating_add(1).min(app.input_max_scroll);
         }
         // ↑/↓ (no modifier): scroll chat history
         KeyCode::Up => {
