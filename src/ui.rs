@@ -110,13 +110,16 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .take(max_vis)
         .map(|(orig_i, item)| {
             let hl = orig_i == sel;
+            let dimmed = !focused; // 전체가 흐리게
             match item {
                 SidebarItem::ProjectHeader { name, expanded, session_count, .. } => {
                     let icon = if *expanded { "▾" } else { "▸" };
                     let s = if hl && focused {
                         Style::new().fg(P).add_modifier(Modifier::BOLD).bg(ACCENT_BG)
-                    } else if hl && !focused {
+                    } else if hl {
                         Style::new().fg(P_DIM).bg(BORDER)
+                    } else if dimmed {
+                        Style::new().fg(DIM).bg(POPOVER)
                     } else {
                         Style::new().fg(P_DIM).bg(POPOVER)
                     };
@@ -126,13 +129,18 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 }
                 SidebarItem::Session { title, active, .. } => {
                     let dot = if *active { "●" } else { "○" };
-                    let s = if *active {
-                        Style::new().fg(if focused { P } else { P_DIM }).add_modifier(Modifier::BOLD)
+                    let s = if *active && focused {
+                        Style::new().fg(P).add_modifier(Modifier::BOLD)
                             .bg(if hl { ACCENT_BG } else { POPOVER })
+                    } else if *active {
+                        Style::new().fg(P_DIM).add_modifier(Modifier::BOLD)
+                            .bg(if hl { BORDER } else { POPOVER })
                     } else if hl && focused {
                         Style::new().fg(TEXT).add_modifier(Modifier::BOLD).bg(ACCENT_BG)
-                    } else if hl && !focused {
+                    } else if hl {
                         Style::new().fg(DIM).bg(BORDER)
+                    } else if dimmed {
+                        Style::new().fg(DIM).bg(POPOVER)
                     } else {
                         Style::new().fg(DIM).bg(POPOVER)
                     };
@@ -142,8 +150,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 }
                 SidebarItem::NewSession => {
                     let label = if hl { " ▸ + new" } else { "   + new" };
-                    let s = if hl {
+                    let s = if hl && focused {
                         Style::new().fg(GREEN).bg(ACCENT_BG)
+                    } else if hl {
+                        Style::new().fg(GREEN).bg(BORDER)
+                    } else if dimmed {
+                        Style::new().fg(DIM).bg(POPOVER)
                     } else {
                         Style::new().fg(DIM).bg(POPOVER)
                     };

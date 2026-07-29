@@ -294,6 +294,11 @@ impl App {
             if (c == 'n' || c == 'N') && self.has_pending_tool() {
                 self.approve(false); return true;
             }
+            // slash always goes to chat input — switch focus if sidebar is focused
+            if c == '/' && self.focus == Focus::Sidebar {
+                self.focus = Focus::Chat;
+                // fall through to handle_chat below
+            }
         }
 
         // Tab: cycle autocomplete suggestions if any, else toggle focus
