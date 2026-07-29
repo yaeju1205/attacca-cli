@@ -627,35 +627,62 @@ impl App {
                 let _ = tx.send(BgEvent::Done); return;
             }
 
-            // 3. Poll (200ms interval — fast for local connections)
+            // 3. Poll loop — deliver messages incrementally
+            let mut last_cursor = 0i64;
             loop {
-                match api.get(&format!("/v1/sessions/{sid}")).await {
-                    Ok(body) => {
-                        if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                            if !v["running"].as_bool().unwrap_or(true) { break; }
+                // fetch new messages since last check
+                if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
+                    if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
+                        if !raw_msgs.is_empty() {
+                            let mut new_msgs = Vec::new();
+                            let mut max_cursor = last_cursor;
+                            for m in &raw_msgs {
+                                if let Some(c) = m["cursor"].as_i64() { max_cursor = max_cursor.max(c); }
+                                if m["role"].as_str() == Some("assistant") {
+                                    if let Some(text) = m["text"].as_str() {
+                                        new_msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                    }
+                                }
+                            }
+                            if !new_msgs.is_empty() {
+                                let _ = tx.send(BgEvent::NewMsgs { msgs: new_msgs, new_cur: max_cursor });
+                            }
+                            last_cursor = max_cursor;
                         }
                     }
-                    Err(_) => break,
                 }
+
+                // check if session is done
+                let done = match api.get(&format!("/v1/sessions/{sid}")).await {
+                    Ok(body) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                            !v["running"].as_bool().unwrap_or(true)
+                        } else { true }
+                    }
+                    Err(_) => true,
+                };
+
+                if done { break; }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
 
-            // 4. Read ALL assistant messages from the session (after=0)
-            // This is simpler and more reliable than cursor tracking.
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
+            // 4. One final fetch to catch anything after the last poll
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                    let mut new_cur = 0i64;
-                    let mut msgs = Vec::new();
-                    for m in &raw_msgs {
-                        if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
-                        if m["role"].as_str() == Some("assistant") {
-                            if let Some(text) = m["text"].as_str() {
-                                msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                    if !raw_msgs.is_empty() {
+                        let mut new_cur = last_cursor;
+                        let mut msgs = Vec::new();
+                        for m in &raw_msgs {
+                            if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
+                            if m["role"].as_str() == Some("assistant") {
+                                if let Some(text) = m["text"].as_str() {
+                                    msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                }
                             }
                         }
-                    }
-                    if !msgs.is_empty() {
-                        let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                        if !msgs.is_empty() {
+                            let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                        }
                     }
                 }
             }
@@ -680,7 +707,30 @@ impl App {
         tokio::spawn(async move {
             let _ = api.post(&format!("/v1/sessions/{sid}/messages"),
                 &serde_json::json!({"message": format!("[tool result]\n{result}"), "timezone": "Asia/Seoul"})).await;
+            let mut last_cursor = 0i64;
             loop {
+                // incrementally deliver new messages
+                if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
+                    if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
+                        if !raw_msgs.is_empty() {
+                            let mut msgs = Vec::new();
+                            let mut max_cursor = last_cursor;
+                            for m in &raw_msgs {
+                                if let Some(c) = m["cursor"].as_i64() { max_cursor = max_cursor.max(c); }
+                                if m["role"].as_str() == Some("assistant") {
+                                    if let Some(text) = m["text"].as_str() {
+                                        msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                    }
+                                }
+                            }
+                            if !msgs.is_empty() {
+                                let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur: max_cursor });
+                            }
+                            last_cursor = max_cursor;
+                        }
+                    }
+                }
+                // check done
                 match api.get(&format!("/v1/sessions/{sid}")).await {
                     Ok(body) => {
                         if let Ok(v) = serde_json::from_str::<Value>(&body) {
@@ -691,20 +741,23 @@ impl App {
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
+            // final fetch
+            if let Ok(body) = api.get(&format!("/v1/sessions/{sid}/messages?after={last_cursor}")).await {
                 if let Ok(raw_msgs) = serde_json::from_str::<Vec<Value>>(&body) {
-                    let mut new_cur = 0i64;
-                    let mut msgs = Vec::new();
-                    for m in &raw_msgs {
-                        if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
-                        if m["role"].as_str() == Some("assistant") {
-                            if let Some(text) = m["text"].as_str() {
-                                msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                    if !raw_msgs.is_empty() {
+                        let mut new_cur = last_cursor;
+                        let mut msgs = Vec::new();
+                        for m in &raw_msgs {
+                            if let Some(c) = m["cursor"].as_i64() { new_cur = new_cur.max(c); }
+                            if m["role"].as_str() == Some("assistant") {
+                                if let Some(text) = m["text"].as_str() {
+                                    msgs.push(Msg { role: "assistant".into(), text: text.into(), raw: None, done: false });
+                                }
                             }
                         }
-                    }
-                    if !msgs.is_empty() {
-                        let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                        if !msgs.is_empty() {
+                            let _ = tx.send(BgEvent::NewMsgs { msgs, new_cur });
+                        }
                     }
                 }
             }
