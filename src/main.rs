@@ -1,16 +1,27 @@
 mod api;
 mod app;
+mod bg;
+mod event;
+mod handler;
 mod tools;
+mod transport;
 mod ui;
 
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
-    let api = api::Api::from_env();
+    let transport = transport::Transport::from_env();
 
-    eprintln!("{}", api.whoami().await);
-    eprintln!("  key: {}", if api.key.is_empty() { "not set" } else { "set" });
+    eprintln!("{}", api::whoami(&transport).await);
+    eprintln!(
+        "  key: {}",
+        if transport.key.is_empty() {
+            "not set"
+        } else {
+            "set"
+        }
+    );
 
-    let mut app = app::App::new(api);
-    app.run().await;
+    let mut app = app::App::new(transport);
+    event::run(&mut app).await;
 }

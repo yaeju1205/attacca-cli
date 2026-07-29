@@ -1,149 +1,174 @@
-use reqwest::Client;
+//! Domain-specific API operations built on top of [`Transport`].
+//!
+//! Each public function takes a `Transport` (or `&Transport`) and returns
+//! structured data — no raw HTTP details leak out.
+
+use crate::transport::Transport;
 use serde_json::Value;
-use std::time::Duration;
 
-#[derive(Clone)]
-pub struct Api {
-    inner: Client,
-    pub key: String,
-    pub base: String,
-}
+// ── User / Auth ────────────────────────────────────────────────
 
-pub type ApiResult = Result<String, (u16, String)>;
-
-impl Api {
-    pub fn from_env() -> Self {
-        let key = std::env::var("ATTACCA_API_KEY").unwrap_or_default();
-        let base = std::env::var("ATTACCA_API_URL")
-            .unwrap_or_else(|_| "https://attacca.cc/api/v1".to_string());
-        let inner = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent("attacca-cli/0.2")
-            .build()
-            .unwrap_or_default();
-        Self { inner, key, base }
-    }
-
-    pub fn url(&self, path: &str) -> String {
-        let b = self.base.trim_end_matches('/');
-        let p = path.trim_start_matches('/');
-        if (b.ends_with("/v1") || b.ends_with("/api/v1")) && p.starts_with("v1/") {
-            format!("{b}/{}", &p[3..])
-        } else {
-            format!("{b}/{p}")
-        }
-    }
-
-    fn headers(&self) -> reqwest::header::HeaderMap {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.key).parse().unwrap());
-        h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
-        h
-    }
-
-    pub async fn get(&self, path: &str) -> ApiResult {
-        let url = self.url(path);
-        let resp = self.inner.get(&url).headers(self.headers()).send().await;
-        match resp {
-            Ok(r) => {
-                let s = r.status().as_u16();
-                let body = r.text().await.unwrap_or_default();
-                if s < 300 { Ok(body) } else { Err((s, body)) }
+/// Fetch `display_name` for an auth smoke test.
+pub async fn whoami(api: &Transport) -> String {
+    match api.get("me").await {
+        Ok(body) => {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                format!(
+                    "✓ {}",
+                    v["display_name"].as_str().unwrap_or("?")
+                )
+            } else {
+                "✓ ok".to_string()
             }
-            Err(e) => Err((0, format!("{e}"))),
         }
-    }
-
-    pub async fn post(&self, path: &str, json: &Value) -> ApiResult {
-        let url = self.url(path);
-        let resp = self.inner.post(&url).headers(self.headers()).json(json).send().await;
-        match resp {
-            Ok(r) => {
-                let s = r.status().as_u16();
-                let body = r.text().await.unwrap_or_default();
-                if s < 300 || s == 202 { Ok(body) } else { Err((s, body)) }
-            }
-            Err(e) => Err((0, format!("{e}"))),
-        }
-    }
-
-    pub async fn whoami(&self) -> String {
-        match self.get("me").await {
-            Ok(body) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                    format!("✓ {}", v["display_name"].as_str().unwrap_or("?"))
-                } else {
-                    "✓ ok".to_string()
-                }
-            }
-            Err((s, b)) => format!("✖ HTTP {s}: {}", b.chars().take(60).collect::<String>()),
-        }
-    }
-
-    /// Returns rich whoami info: name, email, credits, plan, etc.
-    pub async fn whoami_detailed(&self) -> String {
-        match self.get("me").await {
-            Ok(body) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                    let name = v["display_name"].as_str().unwrap_or("?");
-                    let email = v["email"].as_str().unwrap_or("");
-                    let plan = v["plan"].as_str().unwrap_or("");
-                    let credits = v["credits"].as_str().unwrap_or("");
-                    format!("{name}|{email}|{plan}|{credits}")
-                } else {
-                    "?".to_string()
-                }
-            }
-            Err((s, b)) => format!("err: HTTP {s}: {}", b.chars().take(60).collect::<String>()),
-        }
-    }
-
-    /// Get session details (context tokens, model, etc.)
-    pub async fn get_session_info(&self, sid: &str) -> String {
-        match self.get(&format!("/v1/sessions/{sid}")).await {
-            Ok(body) => body,
-            Err(_) => String::new(),
-        }
-    }
-
-    /// Get session usage info as raw Value (credits, tokens, etc.)
-    pub async fn get_session_usage(&self, sid: &str) -> Value {
-        match self.get(&format!("/v1/sessions/{sid}")).await {
-            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
-            Err(_) => Value::Null,
+        Err((s, b)) => {
+            format!(
+                "✖ HTTP {s}: {}",
+                b.chars().take(60).collect::<String>()
+            )
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_url_api_v1_base() {
-        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/api/v1".into() };
-        assert_eq!(api.url("me"), "https://attacca.cc/api/v1/me");
-        assert_eq!(api.url("sessions"), "https://attacca.cc/api/v1/sessions");
+/// Rich user info as structured fields: `(name, email, plan, credits)`.
+pub async fn whoami_detailed(api: &Transport) -> (String, String, String, String) {
+    match api.get("me").await {
+        Ok(body) => {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                let name = v["display_name"].as_str().unwrap_or("").to_string();
+                let email = v["email"].as_str().unwrap_or("").to_string();
+                let plan = v["plan"].as_str().unwrap_or("").to_string();
+                let credits = v["credits"].as_str().unwrap_or("").to_string();
+                (name, email, plan, credits)
+            } else {
+                Default::default()
+            }
+        }
+        Err(_) => Default::default(),
     }
+}
 
-    #[test]
-    fn test_url_plain_base() {
-        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc".into() };
-        assert_eq!(api.url("v1/me"), "https://attacca.cc/v1/me");
-        assert_eq!(api.url("v1/sessions"), "https://attacca.cc/v1/sessions");
-    }
+// ── Sessions ───────────────────────────────────────────────────
 
-    #[test]
-    fn test_url_strips_double_v1() {
-        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/api/v1".into() };
-        assert_eq!(api.url("/v1/me"), "https://attacca.cc/api/v1/me");
-        assert_eq!(api.url("/v1/sessions"), "https://attacca.cc/api/v1/sessions");
+/// Fetch session usage/metadata as a raw JSON Value.
+pub async fn get_session_usage(api: &Transport, sid: &str) -> Value {
+    match api.get(&format!("/v1/sessions/{sid}")).await {
+        Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+        Err(_) => Value::Null,
     }
+}
 
-    #[test]
-    fn test_url_strips_v1_short() {
-        let api = Api { inner: Client::builder().build().unwrap_or_default(), key: String::new(), base: "https://attacca.cc/v1".into() };
-        assert_eq!(api.url("/v1/me"), "https://attacca.cc/v1/me");
-        assert_eq!(api.url("/v1/sessions"), "https://attacca.cc/v1/sessions");
+/// Create a new session and return its id.
+pub async fn create_session(api: &Transport, title: &str) -> Option<String> {
+    match api
+        .post("sessions", &serde_json::json!({ "title": title }))
+        .await
+    {
+        Ok(body) => {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                v["id"].as_str().map(String::from)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
     }
+}
+
+/// Send a message to a session.
+pub async fn send_message(api: &Transport, sid: &str, msg: &str) -> bool {
+    api.post(
+        &format!("/v1/sessions/{sid}/messages"),
+        &serde_json::json!({ "message": msg, "timezone": "Asia/Seoul" }),
+    )
+    .await
+    .is_ok()
+}
+
+/// Fetch raw messages (as JSON Values) for a session after cursor 0.
+/// We always use `after=0` so the caller deduplicates by cursor.
+pub async fn fetch_messages_raw(api: &Transport, sid: &str) -> Vec<Value> {
+    match api.get(&format!("/v1/sessions/{sid}/messages?after=0")).await {
+        Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+        Err(_) => vec![],
+    }
+}
+
+/// Check whether a session is still `running`.
+pub async fn session_is_running(api: &Transport, sid: &str) -> bool {
+    match api.get(&format!("/v1/sessions/{sid}")).await {
+        Ok(body) => {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                v["running"].as_bool().unwrap_or(true)
+            } else {
+                false // parse fail → assume done
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+// ── Projects ───────────────────────────────────────────────────
+
+/// Fetch all projects and return a `(id → name)` map.
+pub async fn fetch_projects(api: &Transport) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(body) = api.get("projects").await {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&body) {
+            for p in &arr {
+                if let (Some(id), Some(name)) = (p["id"].as_str(), p["name"].as_str()) {
+                    map.insert(id.to_string(), name.to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// A minimal session summary from the sessions list.
+#[derive(Clone, Debug)]
+pub struct SessionSummary {
+    pub project_id: String,
+    pub title: String,
+    pub id: String,
+}
+
+/// Fetch the sessions list.
+pub async fn fetch_sessions(api: &Transport) -> Vec<SessionSummary> {
+    if api.key.is_empty() {
+        return vec![];
+    }
+    match api.get("sessions").await {
+        Ok(body) => {
+            if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&body) {
+                arr.iter()
+                    .map(|s| {
+                        let pid = s["project_id"].as_str().unwrap_or("").to_string();
+                        let t = s["title"].as_str().unwrap_or("");
+                        let id = s["id"].as_str().unwrap_or("");
+                        let title = if t.is_empty() || t == "attacca-cli" {
+                            "untitled".into()
+                        } else {
+                            t.into()
+                        };
+                        SessionSummary { project_id: pid, title, id: id.into() }
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+        Err(_) => vec![],
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+
+/// Extract a string from a JSON Value, handling string, i64, and f64.
+pub fn field_val(v: &Value) -> String {
+    v.as_str()
+        .map(String::from)
+        .or_else(|| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| v.as_f64().map(|n| format!("{:.1}", n)))
+        .unwrap_or_default()
 }
