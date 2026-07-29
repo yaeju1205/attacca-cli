@@ -47,8 +47,20 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let sid = app.sid.as_ref().map(|s| short(s)).unwrap_or_default();
-    let status = if app.busy() { "running" } else { "ready" };
-    let status_color = if app.busy() { YELLOW } else { GREEN };
+    let status = if app.busy() {
+        "running"
+    } else if app.has_pending_tool() {
+        "pending"
+    } else {
+        "ready"
+    };
+    let status_color = if app.busy() {
+        YELLOW
+    } else if app.has_pending_tool() {
+        P
+    } else {
+        GREEN
+    };
 
     let mut right = Vec::new();
     if !app.user_name.is_empty() {
@@ -261,31 +273,20 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Hard-wrap every line to `max_width` so each logical line is exactly
-    // one visual row. No .wrap() needed — no bottom clipping, scroll exact.
-    let max_width = area.width.saturating_sub(1) as usize;
-    let mut hard: Vec<Line> = Vec::with_capacity(lines.len() * 2);
-    for l in lines {
-        for chunk in hard_wrap(&l, max_width) {
-            hard.push(chunk);
-        }
-    }
-    lines = hard;
-
-    // Show last `max_rows` lines
+    // Show lines starting from scroll offset. No wrap — lines overflow
+    // to the right. This keeps 1:1 logical=visual row, no bottom clip.
     let total = lines.len();
     let max_rows = area.height.saturating_sub(1) as usize;
-    let skip = if app.at_end || total <= max_rows {
+    let scroll_off = if app.at_end || total <= max_rows {
         total.saturating_sub(max_rows)
     } else {
         total.saturating_sub(max_rows).saturating_sub(app.scroll)
     };
-    if skip > 0 {
-        let _ = lines.drain(..skip.min(total));
-    }
 
     f.render_widget(
-        Paragraph::new(Text::from(lines)).style(Style::new().bg(BG)),
+        Paragraph::new(Text::from(lines))
+            .scroll((scroll_off as u16, 0))
+            .style(Style::new().bg(BG)),
         area,
     );
 }
@@ -496,48 +497,4 @@ fn short_name(s: &str, max: usize) -> String {
     } else {
         s.to_string()
     }
-}
-
-/// Split a ratatui Line into multiple Lines, each at most `max_width` chars.
-/// Preserves the style of each Span, splitting text content at char boundaries.
-/// Split a ratatui Line into multiple Lines, each at most `max_width` chars.
-/// Preserves the style of each Span, splitting text content at char boundaries.
-fn hard_wrap(line: &Line, max_width: usize) -> Vec<Line<'static>> {
-    if max_width == 0 {
-        return vec![Line::from(line.to_string())];
-    }
-    // Extract styled character runs
-    struct Styled(char, Style);
-    let mut chars: Vec<Styled> = Vec::new();
-    for span in &line.spans {
-        for ch in span.content.chars() {
-            chars.push(Styled(ch, span.style));
-        }
-    }
-    if chars.is_empty() {
-        return vec![Line::from("")];
-    }
-
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let end = (i + max_width).min(chars.len());
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut j = i;
-        while j < end {
-            let st = chars[j].1;
-            let mut chunk = String::new();
-            while j < end {
-                // Compare style by equality
-                let (ch, cs) = (chars[j].0, chars[j].1);
-                if cs != st { break; }
-                chunk.push(ch);
-                j += 1;
-            }
-            spans.push(Span::styled(chunk, st));
-        }
-        out.push(Line::from(spans));
-        i = end;
-    }
-    out
 }
