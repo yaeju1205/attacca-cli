@@ -269,7 +269,10 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.at_end = true;
             app.scroll = 0;
         }
-        KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => {
+        // Enter with ANY modifier (Shift/Ctrl/Alt) → insert newline
+        // Plain Enter (no modifier) → send message
+        // This works around terminals that can't distinguish Shift+Enter from Enter.
+        KeyCode::Enter if modifiers.bits() != 0 => {
             app.input.push('\n');
             update_autocomplete(app);
         }
@@ -354,7 +357,7 @@ fn show_help(app: &mut App) {
     app.add_msg("sys", "");
     app.add_msg("sys", "── Keys ─────────────────────────────");
     app.add_msg("sys", "  Enter      Send message");
-    app.add_msg("sys", "  Shift+Enter Newline in input");
+    app.add_msg("sys", "  Shift+Enter Newline (or Ctrl+Enter)");
     app.add_msg("sys", "  Tab        Focus sidebar / autocomplete");
     app.add_msg("sys", "  ↑↓         Scroll chat history");
     app.add_msg("sys", "  y/n        Approve/skip tool calls");
