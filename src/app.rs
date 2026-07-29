@@ -37,6 +37,7 @@ enum Action {
     Send(String),
     Open(String),
     Create,
+    Login(String),
 }
 
 pub struct App {
@@ -106,7 +107,7 @@ impl App {
         term.clear().ok();
         self.load_sessions().await;
         self.load_projects().await;
-        self.add("sys", "attacca — enter:send  tab:autocomplete  y/n:tool  /exit");
+        self.add("sys", "── attacca ── enter:send  tab:autocomplete  y/n:tool  /help ──");
 
         loop {
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
@@ -150,6 +151,7 @@ impl App {
                     Action::Send(msg) => self.send_async(msg).await,
                     Action::Open(sid) => self.open_async(&sid).await,
                     Action::Create => self.create_async().await,
+                    Action::Login(key) => self.login_async(key).await,
                 }
             }
 
@@ -401,7 +403,31 @@ impl App {
                     self.input.clear();
                     match m.as_str() {
                         "/exit" | "/quit" => { self.exit_requested = true; return true; }
-                        "/help" | "/h" => { self.add("sys", "enter:send  y/n:tool  ↑↓:scroll"); return true; }
+                        "/help" | "/h" => {
+                            self.add("sys", "── Commands ──────────────────────────");
+                            self.add("sys", "  /exit       Exit the program");
+                            self.add("sys", "  /help       Show this help");
+                            self.add("sys", "  /new        Create a new session");
+                            self.add("sys", "  /login KEY  Set your API key");
+                            self.add("sys", "  /sessions   Toggle sidebar focus");
+                            self.add("sys", "");
+                            self.add("sys", "── Keys ─────────────────────────────");
+                            self.add("sys", "  Enter      Send message");
+                            self.add("sys", "  Tab        Focus sidebar / autocomplete");
+                            self.add("sys", "  ↑↓         Scroll chat history");
+                            self.add("sys", "  y/n        Approve/skip tool calls");
+                            self.add("sys", "  Ctrl+C     Exit");
+                            return true;
+                        }
+                        cmd if cmd.starts_with("/login ") => {
+                            let key = cmd.trim_start_matches("/login ").trim().to_string();
+                            if !key.is_empty() {
+                                self.actions.push(Action::Login(key));
+                            } else {
+                                self.add("sys", "usage: /login <your_api_key>");
+                            }
+                            return true;
+                        }
                         "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                         _ => {}
                     }
@@ -431,7 +457,7 @@ impl App {
         self.autocomplete_idx = None;
         let trimmed = self.input.trim();
         if trimmed.starts_with('/') && !trimmed.is_empty() && trimmed.len() > 1 {
-            let cmds = ["/exit", "/help", "/sessions", "/new"];
+            let cmds = ["/exit", "/help", "/sessions", "/new", "/login"];
             for cmd in &cmds {
                 if cmd.starts_with(trimmed) {
                     self.autocomplete_suggestions.push(cmd.to_string());
@@ -478,6 +504,20 @@ impl App {
     }
 
     // ── Async operations (all non-blocking via bg tasks) ──
+
+    async fn login_async(&mut self, key: String) {
+        self.api.key = key.clone();
+        let api = self.api.clone();
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let name = api.whoami().await;
+            let _ = tx.send(BgEvent::NewMsgs {
+                msgs: vec![Msg { role: "sys".into(), text: format!("logged in — {name}"), raw: None, done: true }],
+                new_cur: 0,
+            });
+            let _ = tx.send(BgEvent::Done);
+        });
+    }
 
     async fn open_async(&mut self, sid: &str) {
         self.sid = Some(sid.to_string());

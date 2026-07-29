@@ -323,7 +323,7 @@ fn draw_box(f: &mut Frame, app: &App, area: Rect) {
         let items: Vec<ListItem> = suggestions.iter().enumerate().map(|(i, cmd)| {
             let hl = Some(i) == app.autocomplete_idx;
             let desc = match cmd.as_str() {
-                "/exit" => "exit", "/help" => "help", "/sessions" => "sidebar", "/new" => "new chat", _ => "",
+                "/exit" => "exit", "/help" => "help", "/sessions" => "sidebar", "/new" => "new chat", "/login" => "set API key", _ => "",
             };
             let s = if hl { Style::new().bg(P).fg(P_FG) } else { Style::new().bg(CARD).fg(TEXT) };
             ListItem::new(Line::from(vec![
