@@ -2,7 +2,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
 
@@ -273,6 +273,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .scroll((scroll_off as u16, 0))
+            .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
     );
