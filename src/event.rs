@@ -48,7 +48,7 @@ pub async fn run(app: &mut App) {
     load_initial_data(app).await;
     app.add_msg(
         "sys",
-        "── attacca ── enter:send  tab:autocomplete  y/n:tool  /help ──",
+        "── attacca ── enter:send  tab:autocomplete  y/n:tool  read/find/grep auto ──",
     );
 
     // ── Main loop ──
@@ -133,7 +133,20 @@ fn drain_bg_events(app: &mut App) {
                                 app.upsert_msg(m.cursor, "agent", &clean);
                             }
                             for j in tools {
-                                app.add_tool_msg(&j);
+                                // Safe tools auto-execute without y/n approval
+                                if crate::tools::is_safe_tool(&j) {
+                                    let result = crate::tools::exec_tool(&j);
+                                    app.add_msg("result", &result);
+                                    if app.sid.is_some() {
+                                        let transport = app.transport.clone();
+                                        let tx = app.bg_tx.clone();
+                                        let sid = app.sid.clone().unwrap();
+                                        app.inc_busy();
+                                        crate::bg::poll_after_tool(transport, tx, sid, result);
+                                    }
+                                } else {
+                                    app.add_tool_msg(&j);
+                                }
                             }
                         }
                         "user" => {
