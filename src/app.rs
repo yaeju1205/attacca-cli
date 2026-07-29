@@ -83,7 +83,7 @@ impl App {
         term.clear().ok();
         self.load_sessions().await;
         self.load_projects().await;
-        self.add("sys", "attacca — enter:send  tab:sidebar  y/n:tool  q:quit");
+        self.add("sys", "attacca — enter:send  tab:sessions  y/n:tool  /exit");
 
         loop {
             if term.draw(|f| ui::draw(f, self)).is_err() { break; }
@@ -121,6 +121,10 @@ impl App {
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
+                        // Ctrl+C → exit
+                        if k.code == KeyCode::Char('c') && k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                            break;
+                        }
                         if (k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat)
                             && !self.handle_key(k.code) { break; }
                     }
@@ -245,8 +249,8 @@ impl App {
                     if !m.is_empty() {
                         self.input.clear();
                         match m.as_str() {
-                            "/q" | "/quit" | "/exit" => std::process::exit(0),
-                            "/h" | "/help" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); return true; }
+                            "/exit" | "/quit" => std::process::exit(0),
+                            "/help" | "/h" => { self.add("sys", "enter:send  tab:sessions  y/n:tool  ↑↓:scroll"); return true; }
                             "/sessions" | "/s" => { self.show_sidebar = true; return true; }
                             "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                             _ => {}
@@ -261,7 +265,6 @@ impl App {
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve(true),
                 KeyCode::Char('n') | KeyCode::Char('N') => self.approve(false),
-                KeyCode::Char('q') => return false,
                 KeyCode::Char(c) => self.input.push(c),
                 KeyCode::Backspace => { self.input.pop(); }
                 KeyCode::Up => {
@@ -402,7 +405,7 @@ impl App {
                     }
                 }
             }
-            drop(tx); // close channel so next poll shows idle
+            let _ = tx.send(BgEvent::Done);
         });
         // busy stays true until bg sends Done
         // Don't set busy=false here — bg will send Done
