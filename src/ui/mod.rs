@@ -206,6 +206,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 // ───── Chat area ───────────────────────────────────────────────
 
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+    // ── 1. Build all display lines ──
     let mut lines: Vec<Line> = Vec::new();
     let w = area.width.saturating_sub(1) as usize;
 
@@ -271,7 +272,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(YELLOW).add_modifier(Modifier::DIM),
                 )]));
             }
-            "tool" => {}
+            "tool" => {} // approved — don't re-show
             "result" => {
                 if let Some(first) = m.text.lines().next() {
                     let ok = !m.text.starts_with("err") && !m.text.starts_with("skipped");
@@ -303,29 +304,32 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Show only recent messages — truncate lines to roughly 2× the visible area
-    // so wrapping within the area doesn't push content past the bottom.
-    let max_vis = area.height.saturating_sub(1) as usize;
-    let total = lines.len();
-    let max_lines = max_vis * 2; // generous buffer for wrapped lines
-    let skip = total.saturating_sub(max_lines);
+    // ── 2. Scroll positioning ──
+    //
+    // Show the portion of lines that fits in the available height.
+    // Each logical line may wrap to several visual lines (long text),
+    // so we show FEWER logical lines than visual rows.
+    //
+    // Formula: how many LOGICAL lines fit = (visual_rows / 2) rounded up
+    // so even heavy wrapping (~2×) still fits without clipping.
+    //
+    // at_end=true  → show the bottom portion (latest messages)
+    // at_end=false → scrolled up: show older portion by app.scroll
 
-    // User-scroll offset: when at_end, show the very end; when scrolled up,
-    // show progressively older messages.
-    let off = if app.at_end || total <= max_vis {
-        skip
+    let total = lines.len();
+    let visual_rows = area.height.saturating_sub(1) as usize;
+    let cap = (visual_rows / 2).max(3); // logical lines we can safely show
+
+    let scroll_off = if app.at_end || total <= cap {
+        total.saturating_sub(cap)
     } else {
-        let extra = app.scroll.min(skip);
-        skip - extra
+        total.saturating_sub(cap).saturating_sub(app.scroll)
     };
 
-    // Drop early lines we don't need so wrap doesn't push past the bottom
-    if off > 0 {
-        let _ = lines.drain(..off.min(total));
-    }
-
+    // ── 3. Render ──
     f.render_widget(
         Paragraph::new(Text::from(lines))
+            .scroll((scroll_off as u16, 0))
             .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
