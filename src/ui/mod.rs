@@ -304,31 +304,25 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // ── 2. Pick the visible slice ──
+    // ── 2. Scroll to the right position ──
     //
-    // `at_end=true`  → show the bottom portion (latest messages)
-    // `at_end=false` → scrolled up: show older portion
-    //
-    // Show at most `max_rows` logical lines; any excess wraps within the
-    // Paragraph widget and may be clipped — that's expected scroll behaviour.
+    // ratatui's `.scroll()` operates on LOGICAL lines (not visual rows).
+    // When at_end, skip the oldest lines to show the recent portion.
+    // When scrolled up, subtract additional lines.
 
     let total = lines.len();
     let max_rows = area.height.saturating_sub(1) as usize;
 
-    let skip = if app.at_end || total <= max_rows {
-        total.saturating_sub(max_rows) // show last max_rows lines
+    let scroll_off = if app.at_end || total <= max_rows {
+        total.saturating_sub(max_rows)
     } else {
-        total.saturating_sub(max_rows).saturating_sub(app.scroll) // scrolled up
+        total.saturating_sub(max_rows).saturating_sub(app.scroll)
     };
-
-    // Drop lines before `skip` so Paragraph only gets what we want to show
-    if skip > 0 {
-        let _ = lines.drain(..skip.min(total));
-    }
 
     // ── 3. Render ──
     f.render_widget(
         Paragraph::new(Text::from(lines))
+            .scroll((scroll_off as u16, 0))
             .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
