@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // status bar
             Constraint::Min(3),    // main content (chat + sidebar)
-            Constraint::Length(7), // input area: info/separator + 6 content
+            Constraint::Length(4), // input area: info/separator + 3 content lines
         ])
         .split(a);
 
@@ -365,9 +365,8 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Scroll to show the last 3 lines; anything before scrolls out of view.
-    let content_lines = text_area.height as usize;
-    let scroll_off = total.saturating_sub(content_lines);
+    // Show at most 3 lines; scroll when input exceeds that.
+    let scroll_off = total.saturating_sub(3);
 
     f.render_widget(
         Paragraph::new(Text::from(display))
