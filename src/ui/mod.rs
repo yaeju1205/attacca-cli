@@ -303,19 +303,30 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
+    // Show only recent messages — truncate lines to roughly 2× the visible area
+    // so wrapping within the area doesn't push content past the bottom.
     let max_vis = area.height.saturating_sub(1) as usize;
     let total = lines.len();
+    let max_lines = max_vis * 2; // generous buffer for wrapped lines
+    let skip = total.saturating_sub(max_lines);
+
+    // User-scroll offset: when at_end, show the very end; when scrolled up,
+    // show progressively older messages.
     let off = if app.at_end || total <= max_vis {
-        total.saturating_sub(max_vis)
+        skip
     } else {
-        total
-            .saturating_sub(max_vis)
-            .saturating_sub(app.scroll)
+        let extra = app.scroll.min(skip);
+        skip - extra
     };
+
+    // Drop early lines we don't need so wrap doesn't push past the bottom
+    if off > 0 {
+        let _ = lines.drain(..off.min(total));
+    }
 
     f.render_widget(
         Paragraph::new(Text::from(lines))
-            .scroll((off as u16, 0))
+            .wrap(Wrap { trim: false })
             .style(Style::new().bg(BG)),
         area,
     );
