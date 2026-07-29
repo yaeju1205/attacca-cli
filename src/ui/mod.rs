@@ -2,7 +2,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
 
@@ -250,8 +250,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
     if lines.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  >> ", Style::new().fg(P)),
-            Span::styled("type something — enter:send /help", Style::new().fg(DIM)),
+            Span::styled("  ◆ ", Style::new().fg(P)),
+            Span::styled("type something —  enter:send  /help", Style::new().fg(DIM)),
         ]));
     } else if app.busy()
         && app.msgs.last().map(|m| m.role.as_str() == "user").unwrap_or(false)
@@ -261,9 +261,18 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Keep only the last `max_rows` logical lines. Each wraps within the
-    // area width, so the bottom portion may clip slightly — that's expected
-    // terminal scroll behaviour.
+    // Hard-wrap every line to `max_width` so each logical line is exactly
+    // one visual row. No .wrap() needed — no bottom clipping, scroll exact.
+    let max_width = area.width.saturating_sub(1) as usize;
+    let mut hard: Vec<Line> = Vec::with_capacity(lines.len() * 2);
+    for l in lines {
+        for chunk in hard_wrap(&l, max_width) {
+            hard.push(chunk);
+        }
+    }
+    lines = hard;
+
+    // Show last `max_rows` lines
     let total = lines.len();
     let max_rows = area.height.saturating_sub(1) as usize;
     let skip = if app.at_end || total <= max_rows {
@@ -276,9 +285,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     }
 
     f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .style(Style::new().bg(BG)),
+        Paragraph::new(Text::from(lines)).style(Style::new().bg(BG)),
         area,
     );
 }
@@ -489,4 +496,48 @@ fn short_name(s: &str, max: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Split a ratatui Line into multiple Lines, each at most `max_width` chars.
+/// Preserves the style of each Span, splitting text content at char boundaries.
+/// Split a ratatui Line into multiple Lines, each at most `max_width` chars.
+/// Preserves the style of each Span, splitting text content at char boundaries.
+fn hard_wrap(line: &Line, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 {
+        return vec![Line::from(line.to_string())];
+    }
+    // Extract styled character runs
+    struct Styled(char, Style);
+    let mut chars: Vec<Styled> = Vec::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            chars.push(Styled(ch, span.style));
+        }
+    }
+    if chars.is_empty() {
+        return vec![Line::from("")];
+    }
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + max_width).min(chars.len());
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut j = i;
+        while j < end {
+            let st = chars[j].1;
+            let mut chunk = String::new();
+            while j < end {
+                // Compare style by equality
+                let (ch, cs) = (chars[j].0, chars[j].1);
+                if cs != st { break; }
+                chunk.push(ch);
+                j += 1;
+            }
+            spans.push(Span::styled(chunk, st));
+        }
+        out.push(Line::from(spans));
+        i = end;
+    }
+    out
 }
