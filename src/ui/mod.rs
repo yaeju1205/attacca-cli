@@ -5,6 +5,7 @@ use ratatui::widgets::{
     List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, Focus, SidebarItem};
 use palette::*;
@@ -182,6 +183,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let w = area.width.saturating_sub(1) as usize;
+    // Content width inside the "│ " gutter, used to hard-wrap message bodies
+    // so long lines flow to the next row instead of overflowing the panel.
+    let content_width = w.saturating_sub(2).max(1);
 
     for m in &app.msgs {
         match m.role.as_str() {
@@ -197,10 +201,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
                 )]));
                 for l in m.text.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", Style::new().fg(DIM)),
-                        Span::raw(l),
-                    ]));
+                    for chunk in wrap_chars(l, content_width) {
+                        lines.push(Line::from(vec![
+                            Span::styled("│ ", Style::new().fg(DIM)),
+                            Span::raw(chunk),
+                        ]));
+                    }
                 }
                 lines.push(Line::from(vec![Span::styled(
                     "└".to_string() + &"─".repeat(w.saturating_sub(2)),
@@ -213,10 +219,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(P).add_modifier(Modifier::BOLD),
                 )]));
                 for l in m.text.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", Style::new().fg(P)),
-                        Span::raw(l),
-                    ]));
+                    for chunk in wrap_chars(l, content_width) {
+                        lines.push(Line::from(vec![
+                            Span::styled("│ ", Style::new().fg(P)),
+                            Span::raw(chunk),
+                        ]));
+                    }
                 }
                 lines.push(Line::from(vec![Span::styled(
                     "└".to_string() + &"─".repeat(w.saturating_sub(2)),
@@ -228,10 +236,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     "┌─ tool ".to_string() + &"─".repeat(w.saturating_sub(8)),
                     Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
                 )]));
-                lines.push(Line::from(vec![
-                    Span::styled("│ ", Style::new().fg(YELLOW)),
-                    Span::styled(&m.text, Style::new().fg(TEXT)),
-                ]));
+                for chunk in wrap_chars(&m.text, content_width) {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", Style::new().fg(YELLOW)),
+                        Span::styled(chunk, Style::new().fg(TEXT)),
+                    ]));
+                }
                 lines.push(Line::from(vec![
                     Span::styled("│ ", Style::new().fg(YELLOW)),
                     Span::styled("[", Style::new().fg(DIM)),
@@ -273,8 +283,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Show lines starting from scroll offset. No wrap — lines overflow
-    // to the right. This keeps 1:1 logical=visual row, no bottom clip.
+    // Show lines starting from scroll offset. Message bodies are hard-wrapped
+    // above, so each entry here is already a visual row (1:1, no bottom clip).
     let total = lines.len();
     let max_rows = area.height.saturating_sub(1) as usize;
     let scroll_off = if app.at_end || total <= max_rows {
@@ -469,20 +479,28 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
 
 // Helpers
 
-/// Hard-wrap a single logical line into visual rows of at most `width` chars.
-/// An empty line yields one empty row so blank input lines still take a row.
+/// Hard-wrap a single logical line into visual rows of at most `width`
+/// terminal columns, accounting for double-width characters (e.g. Hangul,
+/// CJK) so wrapped rows never overflow the panel. An empty line yields one
+/// empty row so blank input lines still take a row.
 fn wrap_chars(seg: &str, width: usize) -> Vec<String> {
     if seg.is_empty() {
         return vec![String::new()];
     }
-    let chars: Vec<char> = seg.chars().collect();
+    let width = width.max(1);
     let mut rows = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let end = (i + width).min(chars.len());
-        rows.push(chars[i..end].iter().collect());
-        i = end;
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in seg.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + cw > width && !cur.is_empty() {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += cw;
     }
+    rows.push(cur);
     rows
 }
 
