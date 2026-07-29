@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // status bar
             Constraint::Min(3),    // main content (chat + sidebar)
-            Constraint::Length(3), // input area: info/separator + 2 content
+            Constraint::Length(5), // input area: info/separator + 4 content
         ])
         .split(a);
 
@@ -41,7 +41,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mode = if app.transport.key.is_empty() {
         Span::styled("  offline", Style::new().fg(DESTRUCTIVE))
     } else {
-        Span::styled("  online", Style::new().fg(GREEN))
+        Span::styled("  ◉ online", Style::new().fg(GREEN))
     };
 
     let sid = app.sid.as_ref().map(|s| short(s)).unwrap_or_default();
@@ -136,7 +136,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     )]))
                 }
                 SidebarItem::NewSession => {
-                    let label = if hl { " > + new" } else { "   + new" };
+                    let label = if hl { " ▸ + new" } else { "   + new" };
                     let s = if hl && focused {
                         Style::new().fg(GREEN).bg(ACCENT_BG)
                     } else if hl {
@@ -156,7 +156,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let hint_s = if focused { Style::new().fg(P).bg(POPOVER) } else { Style::new().fg(DIM).bg(POPOVER) };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  arrows enter  ", hint_s),
+            Span::styled("  ↑↓·enter  ", hint_s),
             Span::styled("+new", Style::new().fg(GREEN).add_modifier(Modifier::BOLD).bg(POPOVER)),
         ]))
         .style(Style::new().bg(POPOVER)),
@@ -179,7 +179,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             }
             "agent" => {
                 lines.push(Line::from(vec![Span::styled(
-                    "┌─ assistant ".to_string() + &"-".repeat(w.saturating_sub(13)),
+                    "┌─ assistant ".to_string() + &"─".repeat(w.saturating_sub(13)),
                     Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
                 )]));
                 for l in m.text.lines() {
@@ -189,13 +189,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     ]));
                 }
                 lines.push(Line::from(vec![Span::styled(
-                    "└".to_string() + &"-".repeat(w.saturating_sub(2)),
+                    "└".to_string() + &"─".repeat(w.saturating_sub(2)),
                     Style::new().fg(DIM).add_modifier(Modifier::DIM),
                 )]));
             }
             "user" => {
                 lines.push(Line::from(vec![Span::styled(
-                    "┌─ you ".to_string() + &"-".repeat(w.saturating_sub(8)),
+                    "┌─ you ".to_string() + &"─".repeat(w.saturating_sub(8)),
                     Style::new().fg(P).add_modifier(Modifier::BOLD),
                 )]));
                 for l in m.text.lines() {
@@ -205,13 +205,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     ]));
                 }
                 lines.push(Line::from(vec![Span::styled(
-                    "└".to_string() + &"-".repeat(w.saturating_sub(2)),
+                    "└".to_string() + &"─".repeat(w.saturating_sub(2)),
                     Style::new().fg(P).add_modifier(Modifier::DIM),
                 )]));
             }
             "tool" if !m.done => {
                 lines.push(Line::from(vec![Span::styled(
-                    "┌─ tool ".to_string() + &"-".repeat(w.saturating_sub(8)),
+                    "┌─ tool ".to_string() + &"─".repeat(w.saturating_sub(8)),
                     Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
                 )]));
                 lines.push(Line::from(vec![
@@ -220,10 +220,14 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                 ]));
                 lines.push(Line::from(vec![
                     Span::styled("│ ", Style::new().fg(YELLOW)),
-                    Span::styled("[y] run  [n] skip", Style::new().fg(DIM)),
+                    Span::styled("[", Style::new().fg(DIM)),
+                    Span::styled("y", Style::new().fg(GREEN).add_modifier(Modifier::BOLD)),
+                    Span::styled("] run  [", Style::new().fg(DIM)),
+                    Span::styled("n", Style::new().fg(DESTRUCTIVE).add_modifier(Modifier::BOLD)),
+                    Span::styled("] skip", Style::new().fg(DIM)),
                 ]));
                 lines.push(Line::from(vec![Span::styled(
-                    "└".to_string() + &"-".repeat(w.saturating_sub(2)),
+                    "└".to_string() + &"─".repeat(w.saturating_sub(2)),
                     Style::new().fg(YELLOW).add_modifier(Modifier::DIM),
                 )]));
             }
@@ -231,7 +235,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             "result" => {
                 if let Some(first) = m.text.lines().next() {
                     let ok = !m.text.starts_with("err") && !m.text.starts_with("skipped");
-                    let (icon, color) = if ok { ("ok", GREEN) } else { ("xx", DESTRUCTIVE) };
+                    let (icon, color) = if ok { ("ok", GREEN) } else { ("✘", DESTRUCTIVE) };
                     let label: String = first.chars().take(58).collect();
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {icon} {label}"), Style::new().fg(color)),
@@ -331,7 +335,7 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect) {
 
     let segments: Vec<&str> = app.input.split('\n').collect();
     let total = segments.len();
-    let show_from = total.saturating_sub(2);
+    let show_from = total.saturating_sub(4);
 
     let mut display: Vec<Line> = Vec::new();
 
