@@ -246,23 +246,37 @@ impl App {
     // ── Key handling ──
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        // ── Always-active sidebar navigation ──
+        // Tab: cycle autocomplete suggestions if any, else toggle focus
+        if code == KeyCode::Tab {
+            if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
+                self.cycle_autocomplete();
+            } else {
+                self.focus = match self.focus {
+                    Focus::Chat => Focus::Sidebar,
+                    Focus::Sidebar => Focus::Chat,
+                };
+            }
+            return true;
+        }
+
+        match self.focus {
+            Focus::Sidebar => self.handle_sidebar(code),
+            Focus::Chat => self.handle_chat(code),
+        }
+    }
+
+    fn handle_sidebar(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Up => {
                 if self.sel > 0 { self.sel -= 1; self.clamp_sidebar_scroll(); }
-                return true;
             }
             KeyCode::Down => {
                 let max = self.sidebar_items.len().saturating_sub(1);
                 if self.sel < max { self.sel += 1; self.clamp_sidebar_scroll(); }
-                return true;
             }
             KeyCode::Enter | KeyCode::Right => {
-                if self.sel < self.sidebar_items.len()
-                    && matches!(&self.sidebar_items[self.sel], SidebarItem::ProjectHeader { .. })
-                {
+                if self.sel < self.sidebar_items.len() {
                     self.activate_sidebar_selection();
-                    return true;
                 }
             }
             KeyCode::Left => {
@@ -276,51 +290,29 @@ impl App {
                         break;
                     }
                 }
-                return true;
-            }
-            KeyCode::Tab => {
-                // Tab: cycle autocomplete suggestions if any, else toggle focus
-                if self.focus == Focus::Chat && !self.autocomplete_suggestions.is_empty() {
-                    self.cycle_autocomplete();
-                } else {
-                    self.focus = match self.focus {
-                        Focus::Chat => Focus::Sidebar,
-                        Focus::Sidebar => Focus::Chat,
-                    };
-                }
-                return true;
             }
             _ => {}
         }
+        true
+    }
 
-        // ── When sidebar is focused, Enter opens sessions (+ new, etc) ──
-        if self.focus == Focus::Sidebar {
-            if let KeyCode::Enter | KeyCode::Right = code {
-                if self.sel < self.sidebar_items.len() {
-                    self.activate_sidebar_selection();
-                }
-                return true;
-            }
-            return true; // consume all keys when sidebar focused
-        }
-
-        // ── Chat-only keys (scrolling, typing) ──
+    fn handle_chat(&mut self, code: KeyCode) -> bool {
         match code {
+            KeyCode::Up => {
+                if self.scroll > 0 && self.scroll != usize::MAX { self.scroll -= 1; }
+                else if self.scroll == usize::MAX { self.scroll = 0; }
+            }
+            KeyCode::Down => {
+                if self.scroll != usize::MAX { self.scroll += 1; }
+            }
             KeyCode::PageUp => {
                 self.scroll = if self.scroll != usize::MAX { self.scroll.saturating_sub(10) } else { 0 };
-                return true;
             }
             KeyCode::PageDown => {
                 if self.scroll != usize::MAX { self.scroll = self.scroll.saturating_add(10); }
-                return true;
             }
-            KeyCode::Home => { self.scroll = 0; return true; }
-            KeyCode::End => { self.scroll = usize::MAX; return true; }
-            _ => {}
-        }
-
-        // ── Input ──
-        match code {
+            KeyCode::Home => { self.scroll = 0; }
+            KeyCode::End => { self.scroll = usize::MAX; }
             KeyCode::Enter => {
                 let m = self.input.trim().to_string();
                 if !m.is_empty() {
@@ -336,7 +328,7 @@ impl App {
                     self.input.clear();
                     match m.as_str() {
                         "/exit" | "/quit" => { self.exit_requested = true; return true; }
-                        "/help" | "/h" => { self.add("sys", "enter:send  y/n:tool  pgup/pgdn:scroll"); return true; }
+                        "/help" | "/h" => { self.add("sys", "enter:send  y/n:tool  ↑↓:scroll"); return true; }
                         "/new" | "/n" => { self.actions.push(Action::Create); return true; }
                         _ => {}
                     }
