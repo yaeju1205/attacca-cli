@@ -441,19 +441,25 @@ fn cycle_autocomplete(app: &mut App) {
 }
 
 /// Delete one word backward (from cursor to previous word boundary).
+/// Behaves like bash's Ctrl+W: removes the word and its preceding
+/// separator whitespace. Cursor (end of string) follows naturally.
 fn delete_word_backward(app: &mut App) {
     if app.input.is_empty() {
         return;
     }
-    // Strip trailing whitespace, then find the last word boundary
-    let trimmed = app.input.trim_end();
-    if trimmed.is_empty() {
-        app.input.clear();
-        return;
+    let bytes = app.input.as_bytes();
+    let mut i = bytes.len();
+    // 1. Skip trailing whitespace
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
     }
-    let boundary = trimmed
-        .rfind(|c: char| c == ' ' || c == '\t' || c == '\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    app.input.truncate(boundary);
+    // 2. Skip the word
+    while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    // 3. Skip the whitespace separator before the word too
+    if i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    app.input.truncate(i);
 }
