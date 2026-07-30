@@ -33,6 +33,19 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool
     }
 }
 
+/// Process a bracketed-paste event. Pasted text is inserted verbatim —
+/// including any embedded newlines — without going through the per-key
+/// Enter handling, so a newline in clipboard content never submits the
+/// message early.
+pub fn handle_paste(app: &mut App, text: &str) {
+    if app.focus != Focus::Chat {
+        return;
+    }
+    app.input.push_str(text);
+    app.input_scroll = usize::MAX;
+    update_autocomplete(app);
+}
+
 /// Process a mouse event.
 pub fn handle_mouse(app: &mut App, column: u16, row: u16, kind: MouseEventKind) {
     match kind {

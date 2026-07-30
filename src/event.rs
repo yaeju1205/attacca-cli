@@ -10,8 +10,9 @@ use crate::util::short;
 use crate::zyris_client::missing_scopes;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
@@ -115,6 +116,7 @@ fn enter_screen() -> io::Result<()> {
         io::stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableBracketedPaste,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
     )
 }
@@ -124,6 +126,7 @@ fn leave_screen() {
         io::stdout(),
         LeaveAlternateScreen,
         DisableMouseCapture,
+        DisableBracketedPaste,
         PopKeyboardEnhancementFlags,
     );
 }
@@ -416,6 +419,9 @@ fn consume_events(app: &mut App) -> bool {
                     }
                     Ok(Event::Mouse(m)) => {
                         handler::handle_mouse(app, m.column, m.row, m.kind);
+                    }
+                    Ok(Event::Paste(text)) => {
+                        handler::handle_paste(app, &text);
                     }
                     Ok(_) => {}
                     Err(_) => {
