@@ -321,6 +321,14 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
+        KeyCode::Delete => {
+            if app.input_cursor < app.input.len() {
+                let next = next_char_boundary(&app.input, app.input_cursor);
+                app.input.replace_range(app.input_cursor..next, "");
+            }
+            app.input_scroll = usize::MAX;
+            update_autocomplete(app);
+        }
         _ => {}
     }
     true

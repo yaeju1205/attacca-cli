@@ -5,7 +5,7 @@ use ratatui::widgets::{
     List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Msg, MsgKind, SidebarItem};
 use crate::util::short;
@@ -528,7 +528,7 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
                         // Stash (global_row, col) for hardware cursor placement.
                         app.cursor_screen = Some((
                             (rows.len() - 1) as u16,
-                            (3 + left.chars().count()) as u16,
+                            (3 + UnicodeWidthStr::width(&*left)) as u16,
                         ));
                     }
                     None => rows.push(Line::from(vec![gutter, Span::raw(chunk)])),
