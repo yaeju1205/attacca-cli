@@ -489,8 +489,8 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
     if app.input.is_empty() {
         rows.push(Line::from(vec![
             prompt,
-            Span::styled("type a message…", Style::new().fg(DIM)),
             Span::styled("█", Style::new().fg(P)),
+            Span::styled("type a message…", Style::new().fg(DIM)),
         ]));
     } else {
         let mut first_overall = true;

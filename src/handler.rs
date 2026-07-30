@@ -443,22 +443,32 @@ fn cycle_autocomplete(app: &mut App) {
 /// Delete one word backward (from cursor to previous word boundary).
 /// Behaves like bash's Ctrl+W: removes the word and its preceding
 /// separator whitespace. Cursor (end of string) follows naturally.
+///
+/// A newline is a hard boundary, not just another whitespace char: word
+/// deletion never crosses into the previous line, and a lone trailing
+/// newline is removed on its own (like a plain backspace) rather than
+/// being skipped over to reach the word before it.
 fn delete_word_backward(app: &mut App) {
     if app.input.is_empty() {
         return;
     }
     let bytes = app.input.as_bytes();
     let mut i = bytes.len();
-    // 1. Skip trailing whitespace
-    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+    if bytes[i - 1] == b'\n' {
+        i -= 1;
+        app.input.truncate(i);
+        return;
+    }
+    // 1. Skip trailing space/tab
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
         i -= 1;
     }
-    // 2. Skip the word
-    while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+    // 2. Skip the word, stopping at whitespace or a line boundary
+    while i > 0 && !matches!(bytes[i - 1], b' ' | b'\t' | b'\n') {
         i -= 1;
     }
-    // 3. Skip the whitespace separator before the word too
-    if i > 0 && bytes[i - 1].is_ascii_whitespace() {
+    // 3. Skip the space/tab separator before the word too (not a newline)
+    if i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
         i -= 1;
     }
     app.input.truncate(i);
