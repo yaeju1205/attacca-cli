@@ -256,6 +256,18 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             update_autocomplete(app);
         }
         KeyCode::Enter => dispatch_command(app),
+        // Ctrl+W: delete word backward
+        KeyCode::Char('w') if modifiers == KeyModifiers::CONTROL => {
+            delete_word_backward(app);
+            app.input_scroll = usize::MAX;
+            update_autocomplete(app);
+        }
+        // Ctrl+Backspace: delete word backward
+        KeyCode::Backspace if modifiers.contains(KeyModifiers::CONTROL) => {
+            delete_word_backward(app);
+            app.input_scroll = usize::MAX;
+            update_autocomplete(app);
+        }
         KeyCode::Char(c) => {
             app.input.push(c);
             app.input_scroll = usize::MAX;
@@ -426,4 +438,22 @@ fn cycle_autocomplete(app: &mut App) {
         app.input = cmd.clone();
         app.input.push(' ');
     }
+}
+
+/// Delete one word backward (from cursor to previous word boundary).
+fn delete_word_backward(app: &mut App) {
+    if app.input.is_empty() {
+        return;
+    }
+    // Strip trailing whitespace, then find the last word boundary
+    let trimmed = app.input.trim_end();
+    if trimmed.is_empty() {
+        app.input.clear();
+        return;
+    }
+    let boundary = trimmed
+        .rfind(|c: char| c == ' ' || c == '\t' || c == '\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    app.input.truncate(boundary);
 }
