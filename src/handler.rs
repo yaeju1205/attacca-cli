@@ -243,6 +243,10 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.at_end = true;
             app.scroll = 0;
         }
+        // Esc: stop an in-flight turn, same as /cancel.
+        KeyCode::Esc if app.chat.running => {
+            app.actions.push(Action::Cancel);
+        }
         // ── Newline insertion (Enter + any modifier or Ctrl+J) ──
         //
         // Kitty keyboard protocol (enabled in event.rs via
@@ -411,6 +415,7 @@ fn show_help(app: &mut App) {
         "  Tab         Focus sidebar / autocomplete",
         "  ↑↓          Scroll chat history",
         "  Ctrl+↑/↓    Scroll input",
+        "  Esc         Stop the running turn",
         "  Ctrl+C      Exit",
     ] {
         app.push_sys(line);

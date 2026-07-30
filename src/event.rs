@@ -46,7 +46,7 @@ pub async fn run(app: &mut App) {
 
     let _ = term.clear();
 
-    app.push_sys("── attacca ── enter:send  shift+enter:newline  tab:autocomplete  /help ──");
+    app.push_sys("── attacca ── enter:send  shift+enter:newline  esc:stop  tab:autocomplete  /help ──");
     app.rebuild_sidebar();
 
     // ── Main loop ──
