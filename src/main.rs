@@ -121,6 +121,28 @@ async fn main() -> ExitCode {
     let node = tokio::spawn(supervise(runner, tx.clone()));
 
     let mut app = App::new(tx, rx, slot.clone(), authenticator, node_brief);
+    // Restore sessions and last session from local cache.
+    if let Some(state) = App::load_state() {
+        app.sessions = state
+            .sessions
+            .into_iter()
+            .map(|s| app::SessionRow {
+                project_id: s.project_id,
+                title: s.title,
+                id: s.id,
+                running: false,
+            })
+            .collect();
+        app.sidebar_sel = state.sidebar_sel;
+        app.sidebar_scroll = state.sidebar_scroll;
+        if !state.last_project_name.is_empty() {
+            app.current_project_name = state.last_project_name;
+        }
+        app.rebuild_sidebar();
+        if let Some(sid) = state.last_sid {
+            app.pending_restore_sid = Some(sid);
+        }
+    }
     event::run(&mut app).await;
 
     // Raw mode is already restored by now, so closing here costs nothing visible.

@@ -116,6 +116,7 @@ pub async fn run(app: &mut App) {
     }
 
     // ── Cleanup ──
+    app.save_state();
     app.stop_stream();
     let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Show);
     terminal::disable_raw_mode().ok();
@@ -228,6 +229,17 @@ fn drain_bg_events(app: &mut App) -> bool {
                 // The list replaces the rows wholesale, and its `running` is only true as of when
                 // the request was made. The turn feed is more current, so it wins.
                 app.sync_open_row();
+                // If we have a saved session to resume and it exists in the server list,
+                // re-attach to it (first server-sessions event after startup).
+                if app.sid.is_none() {
+                    if let Some(restore) = app.pending_restore_sid.take() {
+                        let exists = app.sessions.iter().any(|r| r.id == restore);
+                        if exists {
+                            attach(app, restore);
+                        }
+                    }
+                }
+                app.save_state();
             }
             BgEvent::Agents(agents) => {
                 app.agents = agents;
@@ -237,6 +249,7 @@ fn drain_bg_events(app: &mut App) -> bool {
                 let id = session.id.clone();
                 app.insert_session(*session);
                 attach(app, id);
+                app.save_state();
             }
             BgEvent::StreamHead {
                 session_id,
@@ -307,6 +320,7 @@ fn drain_bg_events(app: &mut App) -> bool {
 /// Point the UI at a session and start its turn feed.
 fn attach(app: &mut App, sid: String) {
     app.attach_session(sid.clone());
+    app.save_state();
     app.stream = Some(bg::spawn_session_stream(
         sid,
         app.slot.clone(),

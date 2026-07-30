@@ -111,6 +111,65 @@ pub enum Action {
     RefreshSessions,
 }
 
+// ── State persistence ─────────────────────────────────────────
+
+use serde::{Deserialize, Serialize};
+
+/// Snapshot of app state persisted between restarts.
+#[derive(Serialize, Deserialize)]
+pub struct SavedState {
+    pub sessions: Vec<SavedSession>,
+    pub last_sid: Option<String>,
+    pub last_project_name: String,
+    pub sidebar_sel: usize,
+    pub sidebar_scroll: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SavedSession {
+    pub project_id: String,
+    pub title: String,
+    pub id: String,
+}
+
+impl App {
+    pub fn save_state(&self) {
+        let Some(path) = state_path() else { return };
+        let state = SavedState {
+            sessions: self
+                .sessions
+                .iter()
+                .map(|s| SavedSession {
+                    project_id: s.project_id.clone(),
+                    title: s.title.clone(),
+                    id: s.id.clone(),
+                })
+                .collect(),
+            last_sid: self.sid.clone(),
+            last_project_name: self.current_project_name.clone(),
+            sidebar_sel: self.sidebar_sel,
+            sidebar_scroll: self.sidebar_scroll,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(&path, &json);
+        }
+    }
+
+    /// Load saved state and return it (caller applies it after construction).
+    pub fn load_state() -> Option<SavedState> {
+        let path = state_path()?;
+        let json = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&json).ok()
+    }
+}
+
+fn state_path() -> Option<std::path::PathBuf> {
+    let dir = dirs::data_dir().map(|d| d.join("attacca-cli"))
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share/attacca-cli")))?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("state.json"))
+}
+
 // ── Focus ──────────────────────────────────────────────────────
 
 #[derive(PartialEq)]
@@ -462,6 +521,8 @@ pub struct App {
 
     // Session
     pub sid: Option<String>,
+    /// Session ID to restore on next server sessions list.
+    pub pending_restore_sid: Option<String>,
 
     // Input
     pub input: String,
@@ -539,6 +600,7 @@ impl App {
         Self {
             chat: Transcript::new(),
             sid: None,
+            pending_restore_sid: None,
             input: String::new(),
             input_cursor: 0,
             autocomplete_suggestions: vec![],

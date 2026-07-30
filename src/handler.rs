@@ -107,13 +107,13 @@ pub fn handle_mouse(app: &mut App, column: u16, row: u16, kind: MouseEventKind) 
 
 fn handle_sidebar(app: &mut App, code: KeyCode) -> bool {
     match code {
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') => {
             if app.sidebar_sel > 0 {
                 app.sidebar_sel -= 1;
                 clamp_sidebar_scroll(app);
             }
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') => {
             let max = app.sidebar_items.len().saturating_sub(1);
             if app.sidebar_sel < max {
                 app.sidebar_sel += 1;
