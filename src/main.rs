@@ -138,6 +138,7 @@ async fn main() -> ExitCode {
         if !state.last_project_name.is_empty() {
             app.current_project_name = state.last_project_name;
         }
+        app.expanded_projects = state.expanded_projects.into_iter().collect();
         app.rebuild_sidebar();
         if let Some(sid) = state.last_sid {
             app.pending_restore_sid = Some(sid);

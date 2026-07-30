@@ -123,6 +123,9 @@ pub struct SavedState {
     pub last_project_name: String,
     pub sidebar_sel: usize,
     pub sidebar_scroll: usize,
+    /// Restore expanded projects to avoid Default auto-expanding on restart.
+    #[serde(default)]
+    pub expanded_projects: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -149,6 +152,7 @@ impl App {
             last_project_name: self.current_project_name.clone(),
             sidebar_sel: self.sidebar_sel,
             sidebar_scroll: self.sidebar_scroll,
+            expanded_projects: self.expanded_projects.iter().cloned().collect(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
             let _ = std::fs::write(&path, &json);

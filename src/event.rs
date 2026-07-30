@@ -215,7 +215,8 @@ fn drain_bg_events(app: &mut App) -> bool {
                 app.project_names.clear();
                 app.project_order.clear();
                 for p in projects {
-                    if p.is_default {
+                    if p.is_default && app.expanded_projects.is_empty() {
+                        // First-ever startup: expand the default project.
                         app.expanded_projects.insert(p.id.clone());
                     }
                     app.project_order.push(p.id.clone());
