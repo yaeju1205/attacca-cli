@@ -41,7 +41,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
     if app.focus != Focus::Chat {
         return;
     }
-    app.input.push_str(text);
+    insert_at_cursor(app, text);
     app.input_scroll = usize::MAX;
     update_autocomplete(app);
 }
@@ -243,6 +243,20 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.at_end = true;
             app.scroll = 0;
         }
+        // Left/Right: move the insertion point within the input text.
+        // Deliberately not line-bound (unlike Ctrl+W word deletion) — moving
+        // past a line boundary steps onto the adjacent line, same as most
+        // text editors.
+        KeyCode::Left => {
+            if app.input_cursor > 0 {
+                app.input_cursor = prev_char_boundary(&app.input, app.input_cursor);
+            }
+        }
+        KeyCode::Right => {
+            if app.input_cursor < app.input.len() {
+                app.input_cursor = next_char_boundary(&app.input, app.input_cursor);
+            }
+        }
         // Esc: stop an in-flight turn, same as /cancel.
         KeyCode::Esc if app.chat.running => {
             app.actions.push(Action::Cancel);
@@ -261,7 +275,7 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
                 || modifiers.contains(KeyModifiers::ALT)
                 || modifiers.contains(KeyModifiers::CONTROL) =>
         {
-            app.input.push('\n');
+            insert_at_cursor(app, "\n");
             app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
@@ -269,7 +283,7 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         // In raw mode the terminal sends 0x0A as Ctrl+J, which is equivalent to
         // what Ctrl+Enter produces on gnome-terminal, VSCode, iTerm2, etc.
         KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => {
-            app.input.push('\n');
+            insert_at_cursor(app, "\n");
             update_autocomplete(app);
         }
         KeyCode::Enter => dispatch_command(app),
@@ -286,12 +300,17 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             update_autocomplete(app);
         }
         KeyCode::Char(c) => {
-            app.input.push(c);
+            let mut buf = [0u8; 4];
+            insert_at_cursor(app, c.encode_utf8(&mut buf));
             app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
         KeyCode::Backspace => {
-            app.input.pop();
+            if app.input_cursor > 0 {
+                let prev = prev_char_boundary(&app.input, app.input_cursor);
+                app.input.replace_range(prev..app.input_cursor, "");
+                app.input_cursor = prev;
+            }
             app.input_scroll = usize::MAX;
             update_autocomplete(app);
         }
@@ -310,6 +329,7 @@ fn dispatch_command(app: &mut App) {
         if let SidebarItem::Session { title, id, .. } = item {
             if title == &raw {
                 app.input.clear();
+                app.input_cursor = 0;
                 app.input_scroll = usize::MAX;
                 app.actions.push(Action::Open(id.clone()));
                 return;
@@ -318,6 +338,7 @@ fn dispatch_command(app: &mut App) {
     }
 
     app.input.clear();
+    app.input_cursor = 0;
     app.input_scroll = usize::MAX;
     app.autocomplete_suggestions.clear();
     app.autocomplete_idx = None;
@@ -413,6 +434,7 @@ fn show_help(app: &mut App) {
         "  Enter       Send message",
         "  Shift+Enter Newline (Alt+Enter, Ctrl+J too)",
         "  Tab         Focus sidebar / autocomplete",
+        "  ←→          Move cursor in the input",
         "  ↑↓          Scroll chat history",
         "  Ctrl+↑/↓    Scroll input",
         "  Esc         Stop the running turn",
@@ -455,39 +477,185 @@ fn cycle_autocomplete(app: &mut App) {
     if let Some(cmd) = app.autocomplete_suggestions.get(next) {
         app.input = cmd.clone();
         app.input.push(' ');
+        app.input_cursor = app.input.len();
     }
 }
 
-/// Delete one word backward (from cursor to previous word boundary).
+/// Insert `text` at the cursor and advance the cursor past it.
+fn insert_at_cursor(app: &mut App, text: &str) {
+    app.input.insert_str(app.input_cursor, text);
+    app.input_cursor += text.len();
+}
+
+/// The char boundary immediately before `i`, scanning left over UTF-8
+/// continuation bytes so it never lands mid-character.
+fn prev_char_boundary(s: &str, i: usize) -> usize {
+    let mut j = i.saturating_sub(1);
+    while j > 0 && !s.is_char_boundary(j) {
+        j -= 1;
+    }
+    j
+}
+
+/// The char boundary immediately after `i`, scanning right over UTF-8
+/// continuation bytes so it never lands mid-character.
+fn next_char_boundary(s: &str, i: usize) -> usize {
+    let mut j = (i + 1).min(s.len());
+    while j < s.len() && !s.is_char_boundary(j) {
+        j += 1;
+    }
+    j
+}
+
+/// Delete one word backward (from the cursor to the previous word boundary).
 /// Behaves like bash's Ctrl+W: removes the word and its preceding
-/// separator whitespace. Cursor (end of string) follows naturally.
+/// separator whitespace, then leaves the cursor at that point.
 ///
 /// A newline is a hard boundary, not just another whitespace char: word
-/// deletion never crosses into the previous line, and a lone trailing
-/// newline is removed on its own (like a plain backspace) rather than
-/// being skipped over to reach the word before it.
+/// deletion never crosses into the previous line, and a lone newline right
+/// before the cursor is removed on its own (like a plain backspace) rather
+/// than being skipped over to reach the word before it.
 fn delete_word_backward(app: &mut App) {
-    if app.input.is_empty() {
+    let cursor = app.input_cursor;
+    if cursor == 0 {
         return;
     }
     let bytes = app.input.as_bytes();
-    let mut i = bytes.len();
+    let mut i = cursor;
     if bytes[i - 1] == b'\n' {
         i -= 1;
-        app.input.truncate(i);
-        return;
+    } else {
+        // 1. Skip trailing space/tab
+        while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+            i -= 1;
+        }
+        // 2. Skip the word, stopping at whitespace or a line boundary
+        while i > 0 && !matches!(bytes[i - 1], b' ' | b'\t' | b'\n') {
+            i -= 1;
+        }
+        // 3. Skip the space/tab separator before the word too (not a newline)
+        if i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+            i -= 1;
+        }
     }
-    // 1. Skip trailing space/tab
-    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
-        i -= 1;
+    app.input.replace_range(i..cursor, "");
+    app.input_cursor = i;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::BgTx;
+    use crate::brief::NodeBrief;
+    use crate::zyris_client::ApiSlot;
+    use std::sync::Arc;
+
+    fn app() -> App {
+        let (tx, rx): (BgTx, _) = tokio::sync::mpsc::unbounded_channel();
+        let auth = Arc::new(crate::auth::Authenticator::new(
+            Arc::new(crate::auth::SwappableCredentials::new(Arc::new(
+                zyris::runtime::StaticToken::new("znt_test"),
+            ))),
+            "wss://example.test/zyris/v1/ws".into(),
+            "default".into(),
+            "test-node".into(),
+            "test".into(),
+            vec![],
+        ));
+        App::new(
+            tx,
+            rx,
+            ApiSlot::new(),
+            auth,
+            NodeBrief {
+                node_name: "test-node".into(),
+                file_root: "/tmp".into(),
+                terminal: false,
+            },
+        )
     }
-    // 2. Skip the word, stopping at whitespace or a line boundary
-    while i > 0 && !matches!(bytes[i - 1], b' ' | b'\t' | b'\n') {
-        i -= 1;
+
+    /// Typing after moving left inserts at the cursor, not at the end of the string.
+    #[test]
+    fn left_arrow_moves_the_insertion_point_backward() {
+        let mut app = app();
+        for c in "helo".chars() {
+            handle_chat(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_chat(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        handle_chat(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+        assert_eq!(app.input, "hello");
+        assert_eq!(app.input_cursor, 4);
     }
-    // 3. Skip the space/tab separator before the word too (not a newline)
-    if i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
-        i -= 1;
+
+    /// Right arrow cannot walk past the end of the text.
+    #[test]
+    fn right_arrow_stops_at_the_end() {
+        let mut app = app();
+        app.input = "hi".into();
+        app.input_cursor = 2;
+        handle_chat(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.input_cursor, 2);
     }
-    app.input.truncate(i);
+
+    /// Left arrow steps over a multi-byte character as one unit rather than landing
+    /// on a UTF-8 continuation byte, which would panic on the next edit.
+    #[test]
+    fn left_arrow_steps_over_a_multi_byte_char() {
+        let mut app = app();
+        app.input = "a한b".into();
+        app.input_cursor = app.input.len();
+        handle_chat(&mut app, KeyCode::Left, KeyModifiers::NONE); // before 'b', after '한'
+        assert!(app.input.is_char_boundary(app.input_cursor));
+        handle_chat(&mut app, KeyCode::Backspace, KeyModifiers::NONE); // removes all of '한'
+        assert_eq!(app.input, "ab");
+    }
+
+    /// Backspace at a mid-text cursor removes the char just before it, not the last
+    /// char of the string.
+    #[test]
+    fn backspace_removes_the_char_before_the_cursor() {
+        let mut app = app();
+        app.input = "abc".into();
+        app.input_cursor = 2; // between 'b' and 'c'
+        handle_chat(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(app.input, "ac");
+        assert_eq!(app.input_cursor, 1);
+    }
+
+    /// Ctrl+W deletes the word ending at the cursor, leaving anything after it intact.
+    #[test]
+    fn ctrl_w_deletes_the_word_before_the_cursor_not_the_end_of_the_line() {
+        let mut app = app();
+        app.input = "hello world".into();
+        app.input_cursor = "hello".len();
+        delete_word_backward(&mut app);
+        assert_eq!(app.input, " world");
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    /// A lone newline right before the cursor is removed by itself — word deletion
+    /// must not also eat the previous line's last word in the same keystroke.
+    #[test]
+    fn ctrl_w_on_an_empty_line_only_removes_the_newline() {
+        let mut app = app();
+        app.input = "line1\n".into();
+        app.input_cursor = app.input.len();
+        delete_word_backward(&mut app);
+        assert_eq!(app.input, "line1");
+        assert_eq!(app.input_cursor, 5);
+    }
+
+    /// Pasted text lands at the cursor, and any newline it carries is inserted as
+    /// literal text rather than reaching the Enter-to-send path.
+    #[test]
+    fn paste_inserts_at_the_cursor_including_embedded_newlines() {
+        let mut app = app();
+        app.input = "ac".into();
+        app.input_cursor = 1;
+        handle_paste(&mut app, "b\nx");
+        assert_eq!(app.input, "ab\nxc");
+        assert_eq!(app.input_cursor, 4);
+        assert!(app.actions.is_empty(), "paste must not enqueue a send");
+    }
 }

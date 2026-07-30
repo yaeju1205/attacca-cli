@@ -483,7 +483,6 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
     // Build display rows, hard-wrapping each logical line into visual rows so
     // scrolling and the cursor stay correct even without explicit newlines.
     let segments: Vec<&str> = app.input.split('\n').collect();
-    let seg_count = segments.len();
     let mut rows: Vec<Line> = Vec::new();
 
     if app.input.is_empty() {
@@ -493,24 +492,47 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("type a message…", Style::new().fg(DIM)),
         ]));
     } else {
+        // Locate the cursor's segment and its byte offset within that segment, so the
+        // block glyph lands inline at the right spot instead of always at the end.
+        let cursor = app.input_cursor.min(app.input.len());
         let mut first_overall = true;
-        for (si, seg) in segments.iter().enumerate() {
+        let mut seg_start = 0usize;
+        for seg in segments.iter() {
+            let seg_len = seg.len();
+            let cursor_offset =
+                (cursor >= seg_start && cursor <= seg_start + seg_len).then(|| cursor - seg_start);
+
             let chunks = wrap_chars(seg, content_width);
             let chunk_count = chunks.len();
+            let mut chunk_start = 0usize;
             for (ci, chunk) in chunks.into_iter().enumerate() {
-                let is_last_visual = si == seg_count - 1 && ci == chunk_count - 1;
+                let chunk_end = chunk_start + chunk.len();
                 let gutter = if first_overall {
                     prompt.clone()
                 } else {
                     Span::styled("   ", Style::new().fg(DIM))
                 };
                 first_overall = false;
-                rows.push(Line::from(vec![
-                    gutter,
-                    Span::raw(chunk),
-                    Span::styled(if is_last_visual { "█" } else { "" }, Style::new().fg(P)),
-                ]));
+
+                let cursor_here = cursor_offset.filter(|&off| {
+                    (off >= chunk_start && off < chunk_end) || (off == chunk_end && ci == chunk_count - 1)
+                });
+
+                match cursor_here {
+                    Some(off) => {
+                        let (left, right) = chunk.split_at(off - chunk_start);
+                        rows.push(Line::from(vec![
+                            gutter,
+                            Span::raw(left.to_string()),
+                            Span::styled("█", Style::new().fg(P)),
+                            Span::raw(right.to_string()),
+                        ]));
+                    }
+                    None => rows.push(Line::from(vec![gutter, Span::raw(chunk)])),
+                }
+                chunk_start = chunk_end;
             }
+            seg_start += seg_len + 1; // +1 skips the '\n' separator
         }
     }
 

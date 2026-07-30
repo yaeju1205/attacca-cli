@@ -465,6 +465,8 @@ pub struct App {
 
     // Input
     pub input: String,
+    /// Byte offset of the insertion point in `input`. Always a char boundary.
+    pub input_cursor: usize,
     pub autocomplete_suggestions: Vec<String>,
     pub autocomplete_idx: Option<usize>,
 
@@ -536,6 +538,7 @@ impl App {
             chat: Transcript::new(),
             sid: None,
             input: String::new(),
+            input_cursor: 0,
             autocomplete_suggestions: vec![],
             autocomplete_idx: None,
             scroll: 0,
