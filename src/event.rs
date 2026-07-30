@@ -49,10 +49,17 @@ pub async fn run(app: &mut App) {
     app.rebuild_sidebar();
 
     // ── Main loop ──
+    // Redraws only when something actually changed. `chat_lines` re-wraps the whole transcript
+    // from scratch, and drawing unconditionally on every tick meant a long session paid that cost
+    // ~125 times a second even sitting perfectly idle — pinning a CPU core for as long as a chat
+    // stayed open. `dirty` starts `true` so the initial frame still paints.
+    let mut dirty = true;
     loop {
-        // Draw
-        if term.draw(|f| crate::ui::draw(f, app)).is_err() {
-            break;
+        if dirty {
+            if term.draw(|f| crate::ui::draw(f, app)).is_err() {
+                break;
+            }
+            dirty = false;
         }
         if app.exit_requested {
             break;
@@ -63,23 +70,31 @@ pub async fn run(app: &mut App) {
         if app.login_requested {
             app.login_requested = false;
             relogin(app, &mut term).await;
+            dirty = true;
         }
 
         // Drain background events
-        drain_bg_events(app);
+        if drain_bg_events(app) {
+            dirty = true;
+        }
 
         // Drain actions
-        drain_actions(app);
+        if drain_actions(app) {
+            dirty = true;
+        }
 
         // Consume all pending terminal events (non-blocking spin)
         let had_event = consume_events(app);
+        if had_event {
+            dirty = true;
+        }
 
         if app.exit_requested {
             break;
         }
 
         // Brief sleep when idle to avoid 100 % CPU
-        if !had_event {
+        if !dirty {
             tokio::time::sleep(Duration::from_millis(8)).await;
         }
     }
@@ -150,8 +165,10 @@ async fn relogin<B: ratatui::backend::Backend + io::Write>(app: &mut App, term: 
 
 // ── Background event drain ─────────────────────────────────────
 
-fn drain_bg_events(app: &mut App) {
+fn drain_bg_events(app: &mut App) -> bool {
+    let mut any = false;
     while let Ok(ev) = app.bg_rx.try_recv() {
+        any = true;
         match ev {
             BgEvent::Connected(me) => {
                 app.connected = true;
@@ -265,6 +282,7 @@ fn drain_bg_events(app: &mut App) {
             }
         }
     }
+    any
 }
 
 /// Point the UI at a session and start its turn feed.
@@ -279,10 +297,12 @@ fn attach(app: &mut App, sid: String) {
 
 // ── Action drain ───────────────────────────────────────────────
 
-fn drain_actions(app: &mut App) {
+fn drain_actions(app: &mut App) -> bool {
+    let mut any = false;
     // Gated on one-shot requests only, not on `busy()`: with streaming, `busy()` stays true for the
     // whole of a turn, and a follow-up message would sit in the queue until it ended.
     while !app.requests_in_flight() && !app.actions.is_empty() {
+        any = true;
         let action = app.actions.remove(0);
         app.inc_busy();
         match action {
@@ -343,6 +363,7 @@ fn drain_actions(app: &mut App) {
             }
         }
     }
+    any
 }
 
 /// The account half of `/usage`, which comes from `me` and needs no request.

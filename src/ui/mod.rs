@@ -296,39 +296,68 @@ fn chat_lines(msgs: &[Msg], w: usize, content_width: usize) -> Vec<Line<'static>
     lines
 }
 
-// Chat area
-fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
-    let w = area.width.saturating_sub(1) as usize;
-    // Content width inside the "│ " gutter, used to hard-wrap message bodies
-    // so long lines flow to the next row instead of overflowing the panel.
-    let content_width = w.saturating_sub(2).max(1);
-
-    // Reasoning cards carry two rows of chrome each and reasoning is frequent, so
-    // `ATTACCA_HIDE_REASONING=1` drops them rather than truncating them — truncation would change
-    // the row count on settle, and the scroll offset below is derived from `lines.len()`.
-    // Bound to the block so the default path borrows the transcript instead of copying it — this
-    // runs on every frame, and frames are ~125/s while a turn is streaming.
+/// Wrap the last `k` messages (post `hide_reasoning` filtering) into visual rows, and report
+/// whether `k` reached the start of the transcript.
+///
+/// Bounding the slice to `k` — rather than the whole transcript — is what keeps this cheap: the
+/// clone for `hide_reasoning` is `O(k)`, not `O(history)`, and the default path still borrows.
+fn wrap_tail(
+    msgs: &[Msg],
+    k: usize,
+    w: usize,
+    content_width: usize,
+    hide_reasoning: bool,
+) -> (Vec<Line<'static>>, bool) {
+    let start = msgs.len().saturating_sub(k);
+    let slice = &msgs[start..];
     let filtered: Vec<Msg>;
-    let visible: &[Msg] = if app.hide_reasoning {
-        filtered = app
-            .chat
-            .msgs
+    let visible: &[Msg] = if hide_reasoning {
+        filtered = slice
             .iter()
             .filter(|m| m.kind != MsgKind::Reasoning)
             .cloned()
             .collect();
         &filtered
     } else {
-        &app.chat.msgs
+        slice
     };
-    let mut lines = chat_lines(visible, w, content_width);
+    (chat_lines(visible, w, content_width), start == 0)
+}
+
+/// The rows actually shown in the chat viewport: the placeholder/"thinking" line applied, and
+/// scrolled to the current position.
+///
+/// Only the rows that actually fit on screen (plus however far back a manual scroll has gone) are
+/// ever shown, so wrapping the whole transcript from scratch on every call is wasted work that
+/// grows without bound as a chat gets longer — and this runs on every frame, ~125/s while a turn is
+/// streaming. Instead, wrap just enough of the tail to cover the visible window, doubling the slice
+/// until it does (or the transcript runs out). Wrapping is per-message, so this costs
+/// `O(viewport)`, not `O(history)`.
+#[allow(clippy::too_many_arguments)]
+fn visible_chat_rows(
+    msgs: &[Msg],
+    w: usize,
+    content_width: usize,
+    max_rows: usize,
+    at_end: bool,
+    scroll: usize,
+    hide_reasoning: bool,
+    busy: bool,
+) -> Vec<Line<'static>> {
+    let needed = max_rows + if at_end { 0 } else { scroll };
+    let mut k = needed.max(8);
+    let (mut lines, mut exhausted) = wrap_tail(msgs, k, w, content_width, hide_reasoning);
+    while lines.len() < needed && !exhausted {
+        k = k.saturating_mul(2).max(k + 1);
+        (lines, exhausted) = wrap_tail(msgs, k, w, content_width, hide_reasoning);
+    }
 
     if lines.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", Style::new().fg(P)),
             Span::styled("type something —  enter:send  /help", Style::new().fg(DIM)),
         ]));
-    } else if app.busy() && !app.chat.msgs.last().is_some_and(|m| m.streaming) {
+    } else if busy && !msgs.last().is_some_and(|m| m.streaming) {
         lines.push(Line::from(vec![
             Span::styled(" ◉ thinking…", Style::new().fg(P)),
         ]));
@@ -337,17 +366,36 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // Show lines starting from scroll offset. Message bodies are hard-wrapped
     // above, so each entry here is already a visual row (1:1, no bottom clip).
     let total = lines.len();
-    let max_rows = area.height.saturating_sub(1) as usize;
-    let scroll_off = if app.at_end || total <= max_rows {
+    let scroll_off = if at_end || total <= max_rows {
         total.saturating_sub(max_rows)
     } else {
-        total.saturating_sub(max_rows).saturating_sub(app.scroll)
+        total.saturating_sub(max_rows).saturating_sub(scroll)
     };
+    let end = (scroll_off + max_rows).min(total);
+    lines.drain(scroll_off..end).collect()
+}
+
+// Chat area
+fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+    let w = area.width.saturating_sub(1) as usize;
+    // Content width inside the "│ " gutter, used to hard-wrap message bodies
+    // so long lines flow to the next row instead of overflowing the panel.
+    let content_width = w.saturating_sub(2).max(1);
+    let max_rows = area.height.saturating_sub(1) as usize;
+
+    let window = visible_chat_rows(
+        &app.chat.msgs,
+        w,
+        content_width,
+        max_rows,
+        app.at_end,
+        app.scroll,
+        app.hide_reasoning,
+        app.busy(),
+    );
 
     f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .scroll((scroll_off as u16, 0))
-            .style(Style::new().bg(BG)),
+        Paragraph::new(Text::from(window)).style(Style::new().bg(BG)),
         area,
     );
 }
@@ -655,6 +703,134 @@ mod tests {
                 settled.len(),
                 "row count changed with the cursor at width {w}"
             );
+        }
+    }
+
+    // ── Windowed vs. full-history rendering ────────────────────
+
+    /// What [`visible_chat_rows`] replaced: wrap the *entire* transcript, then slice out the
+    /// visible window. Kept here only as an oracle to check the windowed version against.
+    #[allow(clippy::too_many_arguments)]
+    fn full_visible_rows(
+        msgs: &[Msg],
+        w: usize,
+        content_width: usize,
+        max_rows: usize,
+        at_end: bool,
+        scroll: usize,
+        hide_reasoning: bool,
+        busy: bool,
+    ) -> Vec<Line<'static>> {
+        let filtered: Vec<Msg>;
+        let visible: &[Msg] = if hide_reasoning {
+            filtered = msgs
+                .iter()
+                .filter(|m| m.kind != MsgKind::Reasoning)
+                .cloned()
+                .collect();
+            &filtered
+        } else {
+            msgs
+        };
+        let mut lines = chat_lines(visible, w, content_width);
+
+        if lines.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("  ◆ ", Style::new().fg(P)),
+                Span::styled("type something —  enter:send  /help", Style::new().fg(DIM)),
+            ]));
+        } else if busy && !msgs.last().is_some_and(|m| m.streaming) {
+            lines.push(Line::from(vec![
+                Span::styled(" ◉ thinking…", Style::new().fg(P)),
+            ]));
+        }
+
+        let total = lines.len();
+        let scroll_off = if at_end || total <= max_rows {
+            total.saturating_sub(max_rows)
+        } else {
+            total.saturating_sub(max_rows).saturating_sub(scroll)
+        };
+        let end = (scroll_off + max_rows).min(total);
+        lines.drain(scroll_off..end).collect()
+    }
+
+    fn synthetic_msgs(n: usize) -> Vec<Msg> {
+        (0..n)
+            .map(|i| {
+                let kind = match i % 6 {
+                    0 => MsgKind::Sys,
+                    1 => MsgKind::User,
+                    2 => MsgKind::Agent,
+                    3 => MsgKind::Reasoning,
+                    4 => MsgKind::Tool,
+                    _ => MsgKind::Result,
+                };
+                let text = format!(
+                    "message {i} with 한글 텍스트 and some padding {}",
+                    "x".repeat(i % 7)
+                );
+                Msg {
+                    kind,
+                    text,
+                    streaming: false,
+                }
+            })
+            .collect()
+    }
+
+    /// The windowed tail computation must show exactly what wrapping the whole transcript and
+    /// then slicing would have shown — across transcript lengths (short, and long enough to force
+    /// the doubling loop to grow past its first guess), viewport sizes, scroll depths, `at_end`,
+    /// `hide_reasoning`, and a busy/streaming tail.
+    #[test]
+    fn windowed_rows_match_full_history_computation() {
+        for n in [0usize, 1, 5, 50] {
+            for streaming_last in [false, true] {
+                let mut msgs = synthetic_msgs(n);
+                if let Some(last) = msgs.last_mut() {
+                    last.streaming = streaming_last;
+                }
+                for w in [40usize, 80] {
+                    let content_width = w.saturating_sub(2).max(1);
+                    for max_rows in [3usize, 10] {
+                        for at_end in [true, false] {
+                            for scroll in [0usize, 7] {
+                                for hide_reasoning in [false, true] {
+                                    for busy in [false, true] {
+                                        let got = visible_chat_rows(
+                                            &msgs,
+                                            w,
+                                            content_width,
+                                            max_rows,
+                                            at_end,
+                                            scroll,
+                                            hide_reasoning,
+                                            busy,
+                                        );
+                                        let want = full_visible_rows(
+                                            &msgs,
+                                            w,
+                                            content_width,
+                                            max_rows,
+                                            at_end,
+                                            scroll,
+                                            hide_reasoning,
+                                            busy,
+                                        );
+                                        assert_eq!(
+                                            got, want,
+                                            "n={n} streaming_last={streaming_last} w={w} \
+                                             max_rows={max_rows} at_end={at_end} scroll={scroll} \
+                                             hide_reasoning={hide_reasoning} busy={busy}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
