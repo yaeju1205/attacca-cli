@@ -478,6 +478,8 @@ pub struct App {
     /// Recomputed each frame in [`crate::ui`] and read by the input scroll
     /// handler so Ctrl+↑/↓ clamps against wrapped lines, not just `\n` lines.
     pub input_max_scroll: usize,
+    /// Screen coordinate for the hardware cursor, set each frame.
+    pub cursor_screen: Option<(u16, u16)>,
 
     // Sidebar
     pub sidebar_items: Vec<SidebarItem>,
@@ -545,6 +547,7 @@ impl App {
             at_end: true,
             input_scroll: 0,
             input_max_scroll: 0,
+            cursor_screen: None,
             sidebar_items: vec![],
             sidebar_sel: 0,
             sidebar_scroll: 0,

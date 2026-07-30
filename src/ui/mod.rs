@@ -488,7 +488,6 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
     if app.input.is_empty() {
         rows.push(Line::from(vec![
             prompt,
-            Span::styled("│", Style::new().fg(P)),
             Span::styled("type a message…", Style::new().fg(DIM)),
         ]));
     } else {
@@ -524,9 +523,13 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
                         rows.push(Line::from(vec![
                             gutter,
                             Span::raw(left.to_string()),
-                            Span::styled("│", Style::new().fg(P)),
                             Span::raw(right.to_string()),
                         ]));
+                        // Stash (global_row, col) for hardware cursor placement.
+                        app.cursor_screen = Some((
+                            (rows.len() - 1) as u16,
+                            (3 + left.chars().count()) as u16,
+                        ));
                     }
                     None => rows.push(Line::from(vec![gutter, Span::raw(chunk)])),
                 }
@@ -548,6 +551,26 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
 
     let end = (scroll_off + view).min(total_rows);
     let visible: Vec<Line> = rows[scroll_off..end].to_vec();
+
+    // Resolve stashed cursor position into screen coordinates (after scroll_off is known).
+    // For empty input the cursor sits right after the prompt.
+    let cursor_screen = if app.input.is_empty() && chat_focused {
+        Some((text_render_area.x + 3, text_render_area.y))
+    } else {
+        app.cursor_screen.and_then(|(global_row, col)| {
+            let gr = global_row as usize;
+            if gr >= scroll_off && gr < scroll_off + view {
+                let vr = (gr - scroll_off) as u16;
+                Some((
+                    (text_render_area.x + col).min(text_render_area.x + text_render_area.width.saturating_sub(1)),
+                    text_render_area.y + vr,
+                ))
+            } else {
+                None
+            }
+        })
+    };
+    app.cursor_screen = cursor_screen;
 
     f.render_widget(
         Paragraph::new(Text::from(visible)).style(Style::new().bg(BG)),

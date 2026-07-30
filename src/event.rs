@@ -60,6 +60,21 @@ pub async fn run(app: &mut App) {
             if term.draw(|f| crate::ui::draw(f, app)).is_err() {
                 break;
             }
+            // Position the terminal's own hardware cursor where we computed it.
+            if app.focus == crate::app::Focus::Chat {
+                if let Some((x, y)) = app.cursor_screen {
+                    let _ = crossterm::execute!(
+                        io::stdout(),
+                        crossterm::cursor::Show,
+                        crossterm::cursor::MoveTo(x, y),
+                    );
+                } else {
+                    let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Hide);
+                }
+            } else {
+                let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Hide);
+            }
+            app.cursor_screen = None;
             dirty = false;
         }
         if app.exit_requested {
@@ -102,6 +117,7 @@ pub async fn run(app: &mut App) {
 
     // ── Cleanup ──
     app.stop_stream();
+    let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Show);
     terminal::disable_raw_mode().ok();
     leave_screen();
 }
