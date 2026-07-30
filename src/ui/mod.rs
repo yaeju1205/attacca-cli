@@ -488,7 +488,7 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
     if app.input.is_empty() {
         rows.push(Line::from(vec![
             prompt,
-            Span::styled("█", Style::new().fg(P)),
+            Span::styled("│", Style::new().fg(P)),
             Span::styled("type a message…", Style::new().fg(DIM)),
         ]));
     } else {
@@ -521,23 +521,12 @@ fn draw_input_box(f: &mut Frame, app: &mut App, area: Rect) {
                 match cursor_here {
                     Some(off) => {
                         let (left, right) = chunk.split_at(off - chunk_start);
-                        // Vim normal-mode cursor: the block sits ON the character
-                        // at the cursor position, not between characters.
-                        rows.push(if right.is_empty() {
-                            Line::from(vec![
-                                gutter,
-                                Span::raw(left.to_string()),
-                                Span::styled("█", Style::new().fg(P)),
-                            ])
-                        } else {
-                            let first = right.chars().next().unwrap();
-                            Line::from(vec![
-                                gutter,
-                                Span::raw(left.to_string()),
-                                Span::styled("█", Style::new().fg(P)),
-                                Span::raw(right[first.len_utf8()..].to_string()),
-                            ])
-                        });
+                        rows.push(Line::from(vec![
+                            gutter,
+                            Span::raw(left.to_string()),
+                            Span::styled("│", Style::new().fg(P)),
+                            Span::raw(right.to_string()),
+                        ]));
                     }
                     None => rows.push(Line::from(vec![gutter, Span::raw(chunk)])),
                 }
