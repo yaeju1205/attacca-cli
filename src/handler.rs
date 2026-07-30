@@ -243,6 +243,13 @@ fn handle_chat(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.at_end = true;
             app.scroll = 0;
         }
+        // Ctrl+Left/Right: move the insertion point by word.
+        KeyCode::Left if modifiers == KeyModifiers::CONTROL => {
+            move_word_left(app);
+        }
+        KeyCode::Right if modifiers == KeyModifiers::CONTROL => {
+            move_word_right(app);
+        }
         // Left/Right: move the insertion point within the input text.
         // Deliberately not line-bound (unlike Ctrl+W word deletion) — moving
         // past a line boundary steps onto the adjacent line, same as most
@@ -539,6 +546,47 @@ fn delete_word_backward(app: &mut App) {
         }
     }
     app.input.replace_range(i..cursor, "");
+    app.input_cursor = i;
+}
+
+fn move_word_left(app: &mut App) {
+    let cursor = app.input_cursor;
+    if cursor == 0 {
+        return;
+    }
+    let bytes = app.input.as_bytes();
+    let mut i = cursor;
+    // Skip whitespace/newline immediately left of cursor
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t' | b'\n') {
+        i -= 1;
+    }
+    // Skip the word itself to get to its start
+    while i > 0 && !matches!(bytes[i - 1], b' ' | b'\t' | b'\n') {
+        i -= 1;
+    }
+    app.input_cursor = i;
+}
+
+fn move_word_right(app: &mut App) {
+    let cursor = app.input_cursor;
+    let len = app.input.len();
+    if cursor >= len {
+        return;
+    }
+    let bytes = app.input.as_bytes();
+    let mut i = cursor;
+    // Skip whitespace/newline (in case we're between words)
+    while i < len && matches!(bytes[i], b' ' | b'\t' | b'\n') {
+        i += 1;
+    }
+    // Skip the current word
+    while i < len && !matches!(bytes[i], b' ' | b'\t' | b'\n') {
+        i += 1;
+    }
+    // Skip whitespace (but not newline) to land at start of next word
+    while i < len && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
     app.input_cursor = i;
 }
 
