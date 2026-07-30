@@ -32,7 +32,7 @@ zyris = { git = "https://github.com/attacca-cc/zyris", features = ["testing"] }
 # usage tool is unreleased, and convenient whenever both repos move together. A clean
 # checkout without a sibling `../zyris` cannot resolve this — drop the section to build
 # purely from git.
-[patch."https://github.com/attacca-cc/zyris"]
-zyris = { path = "../zyris/crates/zyris" }
-zyris-attacca = { path = "../zyris/crates/zyris-attacca" }
-zyris-caps = { path = "../zyris/crates/zyris-caps" }
+# [patch."https://github.com/attacca-cc/zyris"]
+# zyris = { path = "../zyris/crates/zyris" }
+# zyris-attacca = { path = "../zyris/crates/zyris-attacca" }
+# zyris-caps = { path = "../zyris/crates/zyris-caps" }
